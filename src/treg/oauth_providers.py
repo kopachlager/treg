@@ -1285,29 +1285,31 @@ PRERENDERBUDDY = OAuthProvider(
     service="prerenderbuddy",
     display_name="Prerender Buddy",
     auth_kind="key",
-    token_label="Scoped Developer API key",
+    token_label="Scoped PB API key",
     token_placeholder="your Prerender Buddy API key",
     token_header="Authorization",
     token_format="Bearer {secret}",
-    setup_url="https://app.prerenderbuddy.com/account",
+    setup_url="https://app.prerenderbuddy.com/api-keys",
     setup_action_label="Create a scoped Developer API key",
     setup_steps=(
-        "Sign in to a workspace with Developer API access.",
+        "Create a free PB account or sign in to your existing workspace.",
         "Open the user-avatar menu and choose Developer API keys.",
-        "Create a key with sites, usage, health, activity, visibility and content read scopes.",
+        "For standalone answers, choose Standalone AI checks and add separate API credit.",
+        "For private saved evidence, use an entitled workspace and its sites, usage, health, activity, visibility and content read scopes.",
         "Copy the key and keep it server-side.",
     ),
     setup_note=(
-        "Developer API entitlement is required. Catalog tools read your own saved workspace "
-        "evidence with no additional per-call charge; they do not start monitoring or generate articles."
+        "Standalone answers need the marketplace scope and API credit, with no PB subscription. "
+        "Private evidence reads require Developer API entitlement and matching read scopes. "
+        "Your own key always takes priority and spends PB credit directly; treg does not meter it."
     ),
     auth_uri="", token_uri="", scopes={},
     client_id_setting="", client_secret_setting="",
     category="SEO",
-    summary="Read your website health, crawler activity, recorded AI visibility and content opportunities.",
+    summary="Collect AI answers with citations and brand evidence, or read your own saved website findings.",
     base_url="https://api.prerenderbuddy.com/v1/developer",
-    docs_url="https://prerenderbuddy.com/developer-api",
-    probe_path="/sites",
+    docs_url="https://api.prerenderbuddy.com/v1/developer/marketplace/docs",
+    probe_path="/connection",
 )
 
 

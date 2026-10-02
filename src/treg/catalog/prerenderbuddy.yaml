@@ -1,16 +1,19 @@
 provider: prerenderbuddy
 source:
-  docs: https://prerenderbuddy.com/developer-api
-  openapi: https://api.prerenderbuddy.com/v1/developer/openapi.json
+  docs: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+  openapi: https://api.prerenderbuddy.com/v1/developer/marketplace/openapi.json
   curated: '2026-10-02'
-pricing_url: https://prerenderbuddy.com/pricing
-limits: Requires a workspace with Developer API entitlement and a scoped key. These GET operations read
-  existing workspace evidence; they do not run AI collections, fresh renders or article generation. Read-only
-  calls have no additional per-call charge. Workspace subscription and site limits apply; public per-key
-  request-rate limits are not documented.
+pricing_url: https://api.prerenderbuddy.com/v1/developer/marketplace/rate-card
+limits: 'Standalone answers require the marketplace scope and prepaid API credit, not a PB subscription. Shared-key
+  calls inspect only the submitted prompt and subjects. Private saved workspace evidence is BYOK only, with
+  Developer API entitlement and matching read scopes. Standalone limits: 1,000 prompt characters, 10 new requests/minute
+  and 3 pending/account; answers expire after 23 hours and result content after 7 days. Mentions and citations
+  are included; failed or missing answers and status polls have no charge. Claude uses native batch processing
+  and can take hours. Other platforms use queued realtime processing. These are provider API samples, not consumer-app
+  scrapes or a historical mentions index. The initial pilot has bounded provider capacity; exhausted capacity
+  returns 503 without a charge.'
 proposed_capabilities:
   web.sites.list: List websites registered in your connected workspace
-  web.delivery.logs: Read recent website rendering and delivery logs
   web.site.overview: Read saved website setup, monitoring and visibility context
   web.monitoring.evidence: Read saved website health checks, incidents and discovery-file findings
   web.crawlers.activity: Read recorded crawler visits grouped by platform and page
@@ -39,8 +42,8 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     queryParams: {}
@@ -65,50 +68,11 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     queryParams: {}
-- id: prerenderbuddy.logs
-  capability: web.delivery.logs
-  platform: web
-  domain: logs
-  scope: own_account
-  kind: data
-  method: GET
-  path: /logs
-  name: Read recent delivery logs
-  summary: Get recent render/API logs.
-  input:
-    queryParams:
-      siteId:
-        type: string
-        required: false
-        format: uuid
-      limit:
-        type: integer
-        required: false
-        min: 1
-        max: 100
-        default: 25
-        example: 1
-    note: Requires the usage API key scope. Missing recorded evidence is not proof of a negative outcome.
-  cost:
-    type: free
-    value: 0
-    currency: USD
-    unit: call
-    source: docs
-    source_url: https://prerenderbuddy.com/developer-api
-    checked: '2026-10-02'
-    confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
-  docs_url: https://prerenderbuddy.com/developer-api
-  test_request:
-    queryParams:
-      limit: 1
 - id: prerenderbuddy.overview
   capability: web.site.overview
   platform: web
@@ -137,8 +101,8 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     pathParams:
@@ -171,8 +135,8 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     pathParams:
@@ -220,8 +184,8 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     pathParams:
@@ -252,8 +216,7 @@ endpoints:
         max: 365
         default: 365
         example: 7
-    note: Requires the visibility API key scope. Missing recorded evidence is not proof of a negative
-      outcome.
+    note: Requires the visibility API key scope. Missing recorded evidence is not proof of a negative outcome.
   cost:
     type: free
     value: 0
@@ -263,8 +226,8 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     pathParams:
@@ -287,8 +250,7 @@ endpoints:
         format: uuid
         note: Use a site UUID returned by prerenderbuddy.sites for your connected workspace.
         example: ea91b853-1445-4be6-b0db-c63303c0e4d5
-    note: Requires the visibility API key scope. Missing recorded evidence is not proof of a negative
-      outcome.
+    note: Requires the visibility API key scope. Missing recorded evidence is not proof of a negative outcome.
   cost:
     type: free
     value: 0
@@ -298,8 +260,8 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     pathParams:
@@ -340,8 +302,8 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     pathParams:
@@ -382,9 +344,392 @@ endpoints:
     source_url: https://prerenderbuddy.com/developer-api
     checked: '2026-10-02'
     confidence: documented
-    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render
-      or article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
+    note: Included reads for an entitled connected workspace; a subscription is required. No fresh render or
+      article-draft allowance is consumed. BYOK only; no shared-platform workspace data.
   docs_url: https://prerenderbuddy.com/developer-api
   test_request:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
+- id: prerenderbuddy.api.balance
+  capability: account.usage
+  platform: account
+  domain: account
+  scope: own_account
+  kind: account
+  method: GET
+  path: /marketplace/account
+  name: Check standalone API credit
+  summary: Read your separate PB API credit balance and current reservations.
+  input:
+    note: Requires marketplace scope. A PB subscription is not required. This is your own balance, not treg
+      balance.
+  cost:
+    type: free
+    value: 0
+    currency: USD
+    unit: call
+    source: docs
+    source_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+    checked: '2026-10-02'
+    confidence: documented
+    note: Free balance check. Subscription quotas and API credit are separate.
+  docs_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+  test_request:
+    queryParams: {}
+- id: prerenderbuddy.chatgpt.answer
+  capability: ai-search.chatgpt.answer
+  platform: ai-search
+  domain: chatgpt
+  scope: any_account
+  method: POST
+  path: /marketplace/answers/chatgpt
+  body_allowlist: true
+  name: Get a ChatGPT answer with brand evidence
+  summary: Queue one realtime ChatGPT API answer with returned sources, citations and optional brand/competitor
+    evidence.
+  input:
+    headers:
+      Idempotency-Key:
+        type: string
+        required: false
+        note: "1\u2013256 printable characters. Reuse for retries of the same request; changed parameters return\
+          \ 409."
+    bodyType: json
+    body:
+      prompt:
+        type: string
+        required: true
+        minLength: 5
+        maxLength: 1000
+        example: What does Prerender Buddy do? Answer briefly with sources.
+      brand:
+        type: object
+        required: false
+        note: "Object with required name (1\u2013100 characters), optional aliases (at most 5 strings, 1\u2013\
+          100 characters each), and optional domain (hostname only, at most 253 characters). Evidence is inspected\
+          \ after collection; subjects are not appended to the prompt."
+        example: &id001
+          name: Prerender Buddy
+          domain: prerenderbuddy.com
+      competitors:
+        type: array[object]
+        required: false
+        maxItems: 10
+        note: At most 10 subject objects with the same name/aliases/domain structure as brand.
+    note: Only the submitted question is sent for collection. No location, model or output-size override. Review
+      supporting spans for recommendation heuristics; opaque citation URLs can leave websiteCited unknown.
+  cost:
+    type: per_success
+    value: 0.025
+    currency: USD
+    unit: call
+    source: rate_card_api
+    source_url: https://api.prerenderbuddy.com/v1/developer/marketplace/rate-card
+    checked: '2026-10-02'
+    confidence: documented
+    reported_charge:
+      path: billing.chargedUsd
+      unit: usd
+    note: Fixed price reserved at submission and charged once for a completed, non-empty answer. Failures release
+      credit. Mentions/citations and free polls add no fee.
+  async:
+    id_from: jobId
+    poll:
+      endpoint: prerenderbuddy.answer.status
+      param:
+        in: pathParams
+        name: id
+    status:
+      path: status
+      progress:
+      - queued
+      - running
+      - submitted
+      success:
+      - completed
+      failure:
+      - failed
+    result:
+      path: result
+    interval: 5
+  docs_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+  test_request:
+    body:
+      prompt: What does Prerender Buddy do? Answer briefly with sources.
+      brand: &id002
+        name: Prerender Buddy
+        domain: prerenderbuddy.com
+- id: prerenderbuddy.claude.answer
+  capability: ai-search.claude.answer
+  platform: ai-search
+  domain: claude
+  scope: any_account
+  method: POST
+  path: /marketplace/answers/claude
+  body_allowlist: true
+  name: Get a Claude answer with brand evidence
+  summary: Queue one native batch Claude API answer with returned sources, citations and optional brand/competitor
+    evidence.
+  input:
+    headers:
+      Idempotency-Key:
+        type: string
+        required: false
+        note: "1\u2013256 printable characters. Reuse for retries of the same request; changed parameters return\
+          \ 409."
+    bodyType: json
+    body:
+      prompt:
+        type: string
+        required: true
+        minLength: 5
+        maxLength: 1000
+        example: What does Prerender Buddy do? Answer briefly with sources.
+      brand:
+        type: object
+        required: false
+        note: "Object with required name (1\u2013100 characters), optional aliases (at most 5 strings, 1\u2013\
+          100 characters each), and optional domain (hostname only, at most 253 characters). Evidence is inspected\
+          \ after collection; subjects are not appended to the prompt."
+        example: *id001
+      competitors:
+        type: array[object]
+        required: false
+        maxItems: 10
+        note: At most 10 subject objects with the same name/aliases/domain structure as brand.
+    note: Only the submitted question is sent for collection. No location, model or output-size override. Review
+      supporting spans for recommendation heuristics; opaque citation URLs can leave websiteCited unknown.
+  cost:
+    type: per_success
+    value: 0.024
+    currency: USD
+    unit: call
+    source: rate_card_api
+    source_url: https://api.prerenderbuddy.com/v1/developer/marketplace/rate-card
+    checked: '2026-10-02'
+    confidence: documented
+    reported_charge:
+      path: billing.chargedUsd
+      unit: usd
+    note: Fixed price reserved at submission and charged once for a completed, non-empty answer. Failures release
+      credit. Mentions/citations and free polls add no fee.
+  async:
+    id_from: jobId
+    poll:
+      endpoint: prerenderbuddy.answer.status
+      param:
+        in: pathParams
+        name: id
+    status:
+      path: status
+      progress:
+      - queued
+      - running
+      - submitted
+      success:
+      - completed
+      failure:
+      - failed
+    result:
+      path: result
+    interval: 60
+  docs_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+  test_request:
+    body:
+      prompt: What does Prerender Buddy do? Answer briefly with sources.
+      brand: *id002
+- id: prerenderbuddy.gemini.answer
+  capability: ai-search.gemini.answer
+  platform: ai-search
+  domain: gemini
+  scope: any_account
+  method: POST
+  path: /marketplace/answers/gemini
+  body_allowlist: true
+  name: Get a Gemini answer with brand evidence
+  summary: Queue one realtime Gemini API answer with returned sources, citations and optional brand/competitor
+    evidence.
+  input:
+    headers:
+      Idempotency-Key:
+        type: string
+        required: false
+        note: "1\u2013256 printable characters. Reuse for retries of the same request; changed parameters return\
+          \ 409."
+    bodyType: json
+    body:
+      prompt:
+        type: string
+        required: true
+        minLength: 5
+        maxLength: 1000
+        example: What does Prerender Buddy do? Answer briefly with sources.
+      brand:
+        type: object
+        required: false
+        note: "Object with required name (1\u2013100 characters), optional aliases (at most 5 strings, 1\u2013\
+          100 characters each), and optional domain (hostname only, at most 253 characters). Evidence is inspected\
+          \ after collection; subjects are not appended to the prompt."
+        example: *id001
+      competitors:
+        type: array[object]
+        required: false
+        maxItems: 10
+        note: At most 10 subject objects with the same name/aliases/domain structure as brand.
+    note: Only the submitted question is sent for collection. No location, model or output-size override. Review
+      supporting spans for recommendation heuristics; opaque citation URLs can leave websiteCited unknown.
+  cost:
+    type: per_success
+    value: 0.035
+    currency: USD
+    unit: call
+    source: rate_card_api
+    source_url: https://api.prerenderbuddy.com/v1/developer/marketplace/rate-card
+    checked: '2026-10-02'
+    confidence: documented
+    reported_charge:
+      path: billing.chargedUsd
+      unit: usd
+    note: Fixed price reserved at submission and charged once for a completed, non-empty answer. Failures release
+      credit. Mentions/citations and free polls add no fee.
+  async:
+    id_from: jobId
+    poll:
+      endpoint: prerenderbuddy.answer.status
+      param:
+        in: pathParams
+        name: id
+    status:
+      path: status
+      progress:
+      - queued
+      - running
+      - submitted
+      success:
+      - completed
+      failure:
+      - failed
+    result:
+      path: result
+    interval: 5
+  docs_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+  test_request:
+    body:
+      prompt: What does Prerender Buddy do? Answer briefly with sources.
+      brand: *id002
+- id: prerenderbuddy.perplexity.answer
+  capability: ai-search.perplexity.answer
+  platform: ai-search
+  domain: perplexity
+  scope: any_account
+  method: POST
+  path: /marketplace/answers/perplexity
+  body_allowlist: true
+  name: Get a Perplexity answer with brand evidence
+  summary: Queue one realtime Perplexity API answer with returned sources, citations and optional brand/competitor
+    evidence.
+  input:
+    headers:
+      Idempotency-Key:
+        type: string
+        required: false
+        note: "1\u2013256 printable characters. Reuse for retries of the same request; changed parameters return\
+          \ 409."
+    bodyType: json
+    body:
+      prompt:
+        type: string
+        required: true
+        minLength: 5
+        maxLength: 1000
+        example: What does Prerender Buddy do? Answer briefly with sources.
+      brand:
+        type: object
+        required: false
+        note: "Object with required name (1\u2013100 characters), optional aliases (at most 5 strings, 1\u2013\
+          100 characters each), and optional domain (hostname only, at most 253 characters). Evidence is inspected\
+          \ after collection; subjects are not appended to the prompt."
+        example: *id001
+      competitors:
+        type: array[object]
+        required: false
+        maxItems: 10
+        note: At most 10 subject objects with the same name/aliases/domain structure as brand.
+    note: Only the submitted question is sent for collection. No location, model or output-size override. Review
+      supporting spans for recommendation heuristics; opaque citation URLs can leave websiteCited unknown.
+  cost:
+    type: per_success
+    value: 0.0058
+    currency: USD
+    unit: call
+    source: rate_card_api
+    source_url: https://api.prerenderbuddy.com/v1/developer/marketplace/rate-card
+    checked: '2026-10-02'
+    confidence: documented
+    reported_charge:
+      path: billing.chargedUsd
+      unit: usd
+    note: Fixed price reserved at submission and charged once for a completed, non-empty answer. Failures release
+      credit. Mentions/citations and free polls add no fee.
+  async:
+    id_from: jobId
+    poll:
+      endpoint: prerenderbuddy.answer.status
+      param:
+        in: pathParams
+        name: id
+    status:
+      path: status
+      progress:
+      - queued
+      - running
+      - submitted
+      success:
+      - completed
+      failure:
+      - failed
+    result:
+      path: result
+    interval: 5
+  docs_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+  test_request:
+    body:
+      prompt: What does Prerender Buddy do? Answer briefly with sources.
+      brand: *id002
+- id: prerenderbuddy.answer.status
+  capability: web.answer.status
+  platform: web
+  domain: answer
+  scope: any_account
+  kind: utility
+  method: GET
+  path: /marketplace/jobs/{id}
+  name: Read a queued answer and its charge
+  summary: Read progress or the completed answer for a job created by this API key.
+  resource_ownership:
+    requires:
+      kind: poll:prerenderbuddy.answer.status
+      param: id
+  input:
+    pathParams:
+      id:
+        type: string
+        required: true
+        format: uuid
+        note: Use the jobId returned by a standalone answer submission using the same key.
+    note: Use pollAfterSeconds. Content is retained seven days; later reads return 410 without charging again.
+  cost:
+    type: free
+    value: 0
+    currency: USD
+    unit: call
+    source: docs
+    source_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+    checked: '2026-10-02'
+    confidence: documented
+    note: Free polling; the associated successful answer is charged once.
+  async: false
+  docs_url: https://api.prerenderbuddy.com/v1/developer/marketplace/docs
+  test_request:
+    pathParams:
+      id: 734034f9-ad30-48c5-a72e-64d2aec521fd

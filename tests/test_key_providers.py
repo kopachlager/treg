@@ -433,14 +433,14 @@ async def test_financialdatasets_connect_accepts_only_valid_key_outcomes_without
 
 
 @pytest.mark.parametrize("upstream_status, expected_status", [(200, 200), (401, 422)])
-async def test_prerenderbuddy_connection_uses_scoped_workspace_probe(
+async def test_prerenderbuddy_connection_uses_free_key_probe(
     clients, monkeypatch, upstream_status, expected_status,
 ):
     def probe(request):
         assert request.method == "GET"
-        assert str(request.url) == "https://api.prerenderbuddy.com/v1/developer/sites"
+        assert str(request.url) == "https://api.prerenderbuddy.com/v1/developer/connection"
         assert request.headers["authorization"] == "Bearer own-key"
-        payload = {"sites": []} if upstream_status == 200 else {
+        payload = {"connected": True} if upstream_status == 200 else {
             "error": {"code": "invalid_api_key", "message": "Invalid Prerender Buddy API key."},
         }
         return httpx.Response(upstream_status, json=payload)
