@@ -159,7 +159,11 @@ async loadPlatform(){ if(!this.platSlug) return;
     // (SERPs, keyword data)") that reads as noise under a logo — the tile shows the name, the
     // title attribute keeps the whole thing.
     // The name filter behind the Catalog search box, shared by the shelves and the tab counts.
-    platNameHit(p, q){ return ((p.label||'')+' '+(p.slug||'')+' '+(p.providers||[]).join(' ')).toLowerCase().includes(q); },
+    platNameHit(p, q){
+      const providers=(p.providers||[]).flatMap(s=>[s, this.plats.providers[s]||'']);
+      const names=[p.label||'', p.slug||'', ...providers].map(s=>s.toLowerCase());
+      const compact=q.replace(/[^a-z0-9]/g,'');
+      return names.some(name=>name.includes(q) || (compact && name.replace(/[^a-z0-9]/g,'').includes(compact))); },
 platShort(label){ return String(label||'').split(' — ')[0].split(' (')[0].trim(); },
 platInitial(pl){ return (this.platShort(pl.label)||pl.slug||'?').slice(0,1).toUpperCase(); },
 // Deterministic hue from the slug: an undrawn platform keeps the same colour across reloads

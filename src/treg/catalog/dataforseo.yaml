@@ -388,7 +388,7 @@ endpoints:
     scope: any_account
     method: POST
     path: /on_page/instant_pages
-    name: "Instant on-page audit of a URL — timings, meta, score"
+    name: "On-page audit"
     summary: "Crawl one URL on demand — status code, load timings, on-page score, meta and content"
     input:
       bodyType: json

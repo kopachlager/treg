@@ -30,6 +30,7 @@ import httpx
 from ... import audit
 from ...config import get_settings
 from ...infra.db import session_maker
+from ...domain import asynctasks as asynctasks_rules
 from ...domain.capacity.routes_view import view as overflow_routes_view
 from ...domain.capacity.view import view as capacity_view
 from ...domain.capacity.signatures import classify as classify_capacity
@@ -339,7 +340,7 @@ async def build_plan(ep: dict, identity_given: dict, caller, options: RouteOptio
                 kept.append(c)
         cands = kept
     return Plan(contract=contract, identity=identity, variant=variant,
-                candidates=rank(cands, prefer=options.prefer, exclude=options.exclude,
+                candidates=rank(cands, prefer=options.prefer or list(contract.prefer), exclude=options.exclude,
                                 given={k for k, v in (identity_given or {}).items() if v not in (None, "")},
                                 derive=contract.derive), dropped=dropped)
 
@@ -369,6 +370,14 @@ async def _read(response: UpstreamResponse) -> bytes:
         chunks.append(chunk)
     await response.close()
     return b"".join(chunks)
+
+
+def _finished_on_submission(descriptor: dict, raw: bytes) -> bool:
+    """The child already answered (`terminal_on_submission`): judged like any synchronous answer."""
+    try:
+        return asynctasks_rules.finished_on_submission(descriptor, json.loads(raw))
+    except (ValueError, UnicodeDecodeError):
+        return False
 
 
 async def _async_cost(parent: CallContext, child_ref: str, fallback: int = 0) -> int:
@@ -520,7 +529,8 @@ async def _run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_head
         charged = int(_header(response, "X-Treg-Cost-Micro") or 0)
         descriptor = cand.endpoint.get("async")
         async_outcome = ""
-        if descriptor and 200 <= response.status < 300:
+        if (descriptor and 200 <= response.status < 300
+                and not _finished_on_submission(descriptor, raw)):
             kickoff_raw = raw
             reserved = charged
             poll_rule = descriptor.get("poll") or {}
@@ -609,7 +619,11 @@ async def _run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_head
         capacity_signal = classify_capacity(cand.endpoint["provider"], response.status, body=raw)
         temporary_capacity = capacity_signal is not None and capacity_signal.kind in ("burst", "unknown")
         platform_auth_failure = cand.tier == "platform" and response.status in (401, 403)
-        if (400 <= response.status < 500 and response.status not in (402, 408, 429)
+        # 405 and 410 Gone say the PROVIDER cannot serve this route (a discontinued endpoint answers
+        # 410 to every request), whatever the caller sent: fall over as after a 5xx, paid providers too
+        # (live 2026-10-04: aviato discontinued its LinkedIn post routes and linkedin.user.posts
+        # ended as the caller's fault with three providers never asked).
+        if (400 <= response.status < 500 and response.status not in (402, 405, 408, 410, 429)
                 and not platform_auth_failure and not temporary_capacity):
             # The vendor rejected the REQUEST. Usually the caller's mistake and the same answer
             # everywhere — but a scraper's "Request failed. Please retry" is also a 400 (tikhub,

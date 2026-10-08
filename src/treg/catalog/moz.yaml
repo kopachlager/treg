@@ -264,7 +264,7 @@ endpoints:
     scope: any_account
     method: POST
     path: /link_status
-    name: "Check whether specific sources link to a target domain"
+    name: "Check referring sites"
     summary: "Check whether specific sources link to a target — returns one boolean per source"
     input:
       bodyType: json
@@ -297,7 +297,7 @@ endpoints:
     scope: any_account
     method: POST
     path: /link_intersect
-    name: "Sources linking to competitors but not you — link gap"
+    name: "Competitor link gaps"
     summary: "Sources that link to the given competitors but not to you — link-gap prospecting"
     input:
       bodyType: json
@@ -335,7 +335,7 @@ endpoints:
     scope: any_account
     method: POST
     path: /index_metadata
-    name: "Current Moz link index version"
+    name: "Moz link index version"
     summary: "Which Moz link index is serving results — tells you if metrics moved on a refresh"
     input:
       bodyType: json
@@ -391,7 +391,7 @@ endpoints:
     scope: any_account
     method: POST
     path: /global_top_pages
-    name: "Most-linked pages on the web — index-wide, no target"
+    name: "Top linked pages"
     summary: "Most-linked pages on the web, with full URL metrics (index-wide, takes no target)"
     input:
       bodyType: json
@@ -423,7 +423,7 @@ endpoints:
     scope: any_account
     method: POST
     path: /global_top_root_domains
-    name: "Most-linked domains on the web — Domain Authority, spam"
+    name: "Top linked domains"
     summary: "Most-linked root domains on the web, with DA and spam score (index-wide, no target)"
     input:
       bodyType: json

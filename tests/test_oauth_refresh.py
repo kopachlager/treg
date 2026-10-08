@@ -12,7 +12,7 @@ import time
 import httpx
 from httpx import AsyncClient
 
-from treg import oauth
+from treg import audit, oauth
 
 
 def _oauth_blob(access: str, expires_at: float) -> str:
@@ -65,6 +65,7 @@ async def test_token_endpoint_io_holds_no_database_connection(
     from treg.infra.db import _engine
 
     await _register_oauth_tool(clients, "pool-free-refresh", _oauth_blob("OLD", expires_at=0))
+    await audit.drain()  # Registration's asynchronous audit write must finish before sampling the pool.
     checked_out: list[int] = []
     original_post = app.state.http.post
 

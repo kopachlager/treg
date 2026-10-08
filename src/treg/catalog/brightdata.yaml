@@ -74,7 +74,7 @@ endpoints:
     scope: any_account
     method: POST
     path: /datasets/v3/trigger
-    name: "Start an async scrape of a URL batch — snapshot id"
+    name: "Start a batch scrape"
     summary: "Start an asynchronous scraping job over a batch of URLs and get a snapshot id back"
     resource_ownership:
       produces:

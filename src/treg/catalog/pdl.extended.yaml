@@ -222,7 +222,7 @@ endpoints:
     platform: web
     method: GET
     path: /ip/enrich
-    name: "Enrich an IP address — location, company behind it"
+    name: "IP location and company"
     summary: "Enrich data on an IP by performing a one-to-one match of this IP with the nearly 2 Billion IPs hosted in our dataset, returning location, company, and metadata"
     input:
       queryParams:

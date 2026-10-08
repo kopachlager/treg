@@ -10,6 +10,7 @@ import pytest
 from httpx import AsyncClient
 from conftest import funded_user
 
+from treg import audit
 from treg.config import get_settings
 
 from test_marketplace_call import EP, EP_MICRO, _balance, _entries, platform_on  # noqa: F401
@@ -756,6 +757,7 @@ async def test_a_caller_never_reads_the_recipe_or_an_upstream_error_body(
     await matrix_clients.post("/tools", json={"name": "mine3", "base_url": "https://fake-provider.invalid", "secret_id": sid})
     own = await _publish(matrix_clients, _manifest(name="owned", steps=[{"name": "a", "call": "mine3/x", "input": {}}], output={"x": "$a.data"}, uses=["mine3"]))
     assert (await matrix_clients.post(f"/call/{own}", json={"domain": "x"}, headers={**h, "X-Fake-Body": '{"data": 1}'})).status_code == 200
+    await audit.drain()  # the step's record is a fire-and-forget write: flush it before reading the log
     rows = (await matrix_clients.get("/calls", params={"limit": 50})).json()
     buyer_key = (await matrix_clients.get("/auth/me", headers=h)).json().get("api_key_id")
     # One CI run found the buyer's email in this log and cut the record from its output: name the

@@ -30,6 +30,7 @@ sources:
   - src/treg/alembic/versions/0015_idempotentcall_membership_cascade.py
   - src/treg/alembic/versions/0053_idempotentcall_membership_expires_index.py
   - src/treg/alembic/versions/0054_callrecord_org_id_id.py
+  - src/treg/alembic/versions/0061_remove_redundant_unique_indexes.py
   - src/treg/alembic/versions/0034_managed_api_keys.py
   - src/treg/alembic/versions/0035_default_key_generation.py
   - src/treg/alembic/versions/0036_activity_key_indexes.py
@@ -48,6 +49,8 @@ sources:
   - src/treg/alembic/versions/0041_searchlog.py
   - src/treg/alembic/versions/0055_find_v2_log.py
   - src/treg/alembic/versions/0056_searchlog_verdict.py
+  - src/treg/alembic/versions/0065_call_verdict.py
+  - src/treg/alembic/versions/0066_endpointdaystat_verdicts.py
   - src/treg/timeutil.py
   - src/treg/infra/db.py
   - src/treg/domain/referrals.py
@@ -59,6 +62,7 @@ sources:
   - src/treg/application/auth.py
   - tests/test_postgres_reset.py
   - tests/test_alembic_expand_safety.py
+  - tests/test_redundant_index_migration.py
   - tests/test_api_keys.py
 related:
   - architecture/archive.md
@@ -97,7 +101,9 @@ inserting a submission `CallRecord`, so a poll that finishes first still gives t
 verdict; when the audit row wins the race, the finalizer queues a background correction. Both use the
 original `call_ref`, including routed children. A confirmed terminal failure stores `false`
 for endpoints with verified result rules, since that attempt produced no hit. A pending or
-timed-out submission remains undecided.
+timed-out submission remains undecided. Revision `0065` adds the nullable `verdict` word beside it,
+written by the same finalizer and copied by the same insert and correction; only a successful
+terminal answer carries one.
 
 Migration `0019` adds `consecutive_failures` with a retained server default of zero, allowing old
 writers during rollout. Valid polls reset it; failures grow the retry delay to 15 minutes.
@@ -131,6 +137,11 @@ See [signup eligibility](money.md#signup-credit-eligibility).
 
 ## Registry tables
 
+- **`OnboardingProfile`** - one new user's first-run lookup: `user_id` (unique, no FK, like
+  `ArenaRun`), the team it made, `status` (pending | running | done | failed), an encrypted payload
+  (setup rows, evidence, ranked tasks, filled inputs) and what the lookup cost the house team.
+  Revision `0062`; `application.onboard.first_run` is the only writer. See
+  [onboarding](../interface/onboarding.md#the-first-run-flow-onboarding_v2).
 - **`Feedback`** - durable team-scoped problem reports and suggestions. Contains the submitted
   category/message/references, authenticated org and user attribution, and the references verified
   against that team's call records or ledger. Revision `0025`; `domain.feedback` owns inserts;
@@ -166,6 +177,9 @@ uses this metadata, never the encrypted token's shape.
   FIRST page, first touch wins, 90 days), persisted once at signup in both doors. This is the column
   set that answers "how many teams did campaign X bring" - the `ad_*` columns only know Google
   clicks. `utm_referrer` is the referring hostname, kept even when no `utm_*` tag was present.
+  The first page itself is a separate first-touch cookie, `treg_landing` (path only, set on every
+  first visit, utm or not); it is ranking evidence for the first-run onboarding and is not stored
+  on the team.
   **`first_call_at`** (same migration as `ad_*`) -
   set once by a guarded UPDATE in the `/call/` handler,
   deliberately NOT derived from `CallRecord` (which `audit.py` sheds under load, undercounting exactly
@@ -260,7 +274,8 @@ uses this metadata, never the encrypted token's shape.
   observed reliability and the Arena's rolling insights, are scheduled `treg-worker` commands
   that walk it incrementally by primary key. Revision 0038 adds their catalog half:
   `EndpointDayStat` (one row per endpoint per UTC day: counts, newest success, hit tallies and a
-  bounded latency sample; primary key `(endpoint_id, day)`, indexed by `day` for the window prune)
+  bounded latency sample, plus `verdicts`, calls per verdict word, added nullable by `0066`;
+  primary key `(endpoint_id, day)`, indexed by `day` for the window prune)
   and the single-row `EndpointStatCursor` (`cursor_id`, the `created_at` watermark and
   `caught_up_at`, which is what lets the reader fall back to the live aggregate until the worker
   has caught up). `application/catalog_stats.py` is the only writer of both; see
@@ -324,6 +339,17 @@ uses this metadata, never the encrypted token's shape.
   fields added by `0011`. Archive storage, eligibility and retention belong to
   [archive](archive.md); caller tags and money joins are covered below.
 
+  `upstream_ms` (Alembic `0063`) is the provider's share of `duration_ms`: from sending the request
+  until its answer is read (or, when the answer streams on, until its headers arrive). It leaves
+  out token refresh, archive lookup, a `retry-after` sleep and treg's own work. NULL when no
+  request reached the provider, and on rows written before the column existed.
+
+  `verdict` (Alembic `0065`) is the contract's verdict word for the answer, set beside `hit` by the
+  same adapter: `valid` / `invalid` / `catch_all` / `risky` / `unknown` for an email verify,
+  `verified` / `unverified` for an email find (the provider's own claim). One word from the
+  contract's closed list, never content. NULL when the contract records no verdict, the answer
+  carried none, or the provider used a word its adapter does not map. See
+  [catalog](catalog.md) for the declarations.
 - **`IdempotentCall`** - a caller-scoped, 24-hour replay cache for metered successes, keyed by
   `(membership_id, key)` and also carrying `org_id` for team cleanup. It is not an audit record: once
   the membership is revoked there is no valid caller that can replay it. `delete_membership` removes
@@ -337,6 +363,9 @@ uses this metadata, never the encrypted token's shape.
   `idempotency_response_lost` with the charge when the owner's ledger shows one, else
   `idempotency_outcome_unknown`. The key is never run again: a lapsed lease does not prove its owner
   stopped. Rows without a `call_ref` (written before this) keep answering 409 until they expire.
+  A kept answer over `archive_max_body_bytes` (2 MB, the archive's own limit) is not stored:
+  `_store_idempotent` keeps a terminal 410 `idempotency_response_too_large` (`call_id`, charge,
+  `size_bytes`) instead. The caller already received the full answer; a retry never runs again.
   The per-call expired-label sweep reads `(membership_id, expires_at)` (Alembic `0053`), so its
   cost is the expired rows, not every label the caller holds.
 - **`ToolRequest`** - a "the catalog doesn't have X" report (`POST /tool-requests`, open + per-IP
@@ -495,6 +524,15 @@ set of additive Alembic operations. Any ALTER, DROP, raw execution, or unknown o
 module-level `contract = True` and name its rollback floor in the module docstring. Revisions 0003,
 0004, and 0008 declare theirs: each adds a NOT NULL column and drops its server default, so older
 code can no longer insert rows.
+
+Revision `0061` removes the redundant ordinary indexes on `ArchiveKey.key_hash`,
+`OAuthRefresh.token_hash`, `OAuthClient.client_id`, `OAuthCode.code` and `ArenaEvaluation.run_id`.
+Their named single-column unique constraints retain indexed lookups and uniqueness; model metadata
+declares only those constraints. Composite-prefix indexes are unchanged. The migration checks every
+replacement before dropping anything and refuses unexpected definitions or an unusable unique index.
+PostgreSQL drops each index concurrently in an autocommit block, with bounded timeouts restored
+afterward. A partial attempt can be retried. Downgrade rebuilds the ordinary indexes concurrently,
+repairing invalid build debris, and needs space for those indexes. No rows or foreign keys change.
 
 ## Audit writer (`audit.py`)
 

@@ -74,6 +74,9 @@ _TABLE: list[tuple[str, int, str, str]] = [
     # X-RateLimit-* headers, never a period quota; the plan allowance resets monthly at
     # `cycleResetsAt` from GET /v1/credits.
     ("cloro", 403, r"insufficient_credits", "balance"),
+    ("crawl4ai", 402, r"no_credit", "balance"),
+    ("crawl4ai", 402, r"spend_cap|plan_cap", "quota"),
+    ("crawl4ai", 429, r"", "burst"),
     # Tavily documents distinct custom statuses for the monthly plan allowance and the operator's
     # PAYGO ceiling. Both are quotas: the first resets with the plan period; the second serves again
     # when the operator raises its dashboard limit. Neither is a transient 429 burst.
@@ -100,7 +103,7 @@ CAPACITY_PHRASES = (
     r"(?:account |api |credit )?(?:balance|quota)(?: (?:has been|is|was))? (?:exceeded|reached|exhausted|limit)",
     r"upgrade your plan", r"insufficient-quota", r"not have enough quota",
     r"discovery api credit limit reached", r"exceeds your plan's set usage limit",
-    r"exceeds the pay-as-you-go limit",
+    r"exceeds the pay-as-you-go limit", r"no_credit",
 )
 _UNRECORDED = re.compile(r"\b(?:" + "|".join(f"(?:{p})" for p in CAPACITY_PHRASES) + r")\b", re.IGNORECASE)
 

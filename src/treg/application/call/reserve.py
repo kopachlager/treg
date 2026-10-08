@@ -248,6 +248,14 @@ async def _platform_reserve(mk: MarketplaceCall, caller: Caller, meta: CallMeta 
                     tags=meta.tags, call_id=call_ref)
             except ledger.InsufficientBalance:
                 await db.rollback()
+                # A refused call asks for a refill too. Only a call that got through used to, so a
+                # team at $0 with auto top-up on stayed empty until something else ran, refusing
+                # every call meanwhile. One read by primary key, refusals only;
+                # the wait check in `maybe_schedule_autotopup` keeps it from starting a task per call.
+                if auto_on:
+                    org = await db.get(Org, caller.org_id)
+                    if org is not None:
+                        billing.maybe_schedule_autotopup(org)
                 raise
             await db.commit()
             # The conditional UPDATE bypasses an ORM instance. Reload after commit so auto-top-up sees
@@ -267,8 +275,8 @@ async def _platform_reserve(mk: MarketplaceCall, caller: Caller, meta: CallMeta 
         # otherwise the natural reading of "add funds" is that auto top-up is broken.
         if auto_on:
             auto_line = (f"  auto top-up:    on — adds ${ledger.usd(prefs['amount_micro']):g} when the balance "
-                         f"drops below ${ledger.usd(prefs['threshold_micro']):g}, at most once per "
-                         f"{get_settings().autotopup_cooldown_s // 60} min and "
+                         f"drops below ${ledger.usd(prefs['threshold_micro']):g}, at most "
+                         f"{prefs['per_hour']} times per hour and "
                          f"${ledger.usd(prefs['monthly_cap_micro']):g}/month. Raise the amount or the "
                          f"cap if your burn outruns it: treg topup --auto on --amount 50 --cap 500")
         else:

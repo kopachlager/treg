@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -179,7 +179,8 @@ def build(cat: store.Catalog) -> Index:
         platform = cap.split(".")[0]
         units.append(Unit(
             kind=JOB, id=cap, cap=cap, platform=platform,
-            text=f"{cap.replace('.', ' ')}. {cat.capabilities.get(cap, '')}. {plat_label(platform)}. "
+            text=f"{cap.replace('.', ' ')}. {cat.capability_titles.get(cap, '')}. "
+                 f"{cat.capabilities.get(cap, '')}. {plat_label(platform)}. "
                  + "; ".join(names[:EXAMPLES]),
             providers=tuple(sorted({e["provider"] for e in members})), examples=tuple(names[:6]),
             members=tuple(e["id"] for e in members)))
@@ -256,23 +257,30 @@ def _products(eps: list[dict], cat: store.Catalog) -> tuple[dict[str, tuple[str,
     """Model and product names: words in the endpoint names on the AI generation platforms that at
     least two of those names share and that names elsewhere rarely use ("gemini" yes, "image" no),
     and that `aliases.yaml` does not already file as a way of saying a job ("tts" is text-to-speech),
-    plus the adjacent pairs of them ("nano banana"). Each maps, spaces and hyphens folded away, to
-    every shown endpoint whose name carries it, on any platform."""
+    plus the adjacent pairs of them ("nano banana"). On a platform with a single endpoint no two
+    names can share a word, so its name's words that appear nowhere else in the catalog count too
+    ("jev", the one judge). Each maps, spaces and hyphens folded away, to every shown endpoint whose
+    name carries it, on any platform."""
     gen = {slug for slug, p in cat.platforms.items() if p.get("category") == PRODUCT_CATEGORY}
     plat_words = {w for slug, p in cat.platforms.items() for w in words(f"{slug} {p.get('label', '')}")}
     vocabulary = {w for key in cat.aliases for w in words(key)}   # "tts", "t2v": a way of saying a job
     inside: dict[str, set[str]] = defaultdict(set)
     outside: dict[str, int] = defaultdict(int)
+    alone: set[str] = set()                                        # words of a one-endpoint platform's name
+    size = Counter(e["platform"] for e in eps if e["platform"] in gen)
     name_words = {e["id"]: words(e.get("name") or "") for e in eps}
     for e in eps:
         for w in set(name_words[e["id"]]):
             if e["platform"] in gen:
                 inside[w].add(e["id"])
+                if size[e["platform"]] == 1:
+                    alone.add(w)
             else:
                 outside[w] += 1
     product = {w for w, ids in inside.items()
-               if len(ids) >= 2 and len(w) >= 3 and w.isalpha() and w not in STOPWORDS
-               and w not in plat_words and w not in vocabulary and outside[w] <= 3 and outside[w] * 2 < len(ids)}
+               if len(w) >= 3 and w.isalpha() and w not in STOPWORDS and w not in plat_words and w not in vocabulary
+               and ((len(ids) >= 2 and outside[w] <= 3 and outside[w] * 2 < len(ids))
+                    or (w in alone and outside[w] == 0))}
     keys: dict[str, set[str]] = defaultdict(set)
     labels: dict[str, str] = {}
     for e in eps:

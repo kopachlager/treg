@@ -165,7 +165,8 @@ Notes:
   - **Routed endpoints** (`treg.<capability>`, e.g. `treg.people.email.find`) are where you can
     ask treg to choose: POST the identity (`{full_name, domain}` | `{first_name, last_name, domain}` |
     `{linkedin_url}`); treg runs the best child (own keys first, then cheapest per hit), falls back
-    on errors AND misses (cheapest first, within `X-Treg-Route-Max-Cost`, default $1), and returns
+    on errors AND misses (cheapest first, within `X-Treg-Route-Max-Cost`, default $1; a miss can be
+    billed, so a routed row quotes `usd_per_call: null`, not $0 — set the header for bulk runs), and returns
     `{output, raw, _treg.served_by, _treg.tried}` + `X-Treg-Served-By`. `X-Treg-Route-Waterfall: 0`
     stops at the first miss. A filter a provider cannot apply (`country` on a name-only search) is
     still sent to the others, and the answer names it in `X-Treg-Ignored-Filters` / `_treg.ignored_filters`
@@ -231,6 +232,10 @@ How it works:
   task id, a resumable `treg call …` command (Ctrl-C loses the wait, never the task or the money),
   progress, and the result URL. Exit 0 = done, 2 = the provider failed the task, 3 = timed out
   (resume with the printed command).
+- **Some async tools usually answer at once** (an email verification): when the first response is
+  already finished, it is the answer and is charged as one; `--await` prints it without polling. If
+  it says "still working", poll no faster than the descriptor's `interval` and stop at its `max_age`
+  seconds; a task with no answer by then is refunded.
 - **Reference media (a face image, a voice clip, a first frame) must be a public URL the vendor
   can fetch.** Do not reach for a paste host: they fail vendor probes at random (catbox, tmpfiles,
   uguu all did). `treg host face.jpg` prints a public URL (30 MB, 7 days, free) that drops straight

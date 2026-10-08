@@ -150,6 +150,7 @@ class OrgSnapshot:
     autotopup_amount_micro: int
     autotopup_monthly_cap_micro: int
     first_call_at: Any
+    autotopup_max_per_hour: int = 0
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,7 @@ class CallerSnapshot:
                 autotopup_threshold_micro=org.autotopup_threshold_micro,
                 autotopup_amount_micro=org.autotopup_amount_micro,
                 autotopup_monthly_cap_micro=org.autotopup_monthly_cap_micro,
+                autotopup_max_per_hour=int(getattr(org, 'autotopup_max_per_hour', 0) or 0),
                 first_call_at=org.first_call_at,
             ),
             api_key_id=key.id if key else None,

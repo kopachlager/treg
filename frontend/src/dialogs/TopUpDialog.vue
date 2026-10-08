@@ -50,7 +50,7 @@ export default { setup: useDashboard }
                      Edit panel changes them. Not the top-up amount: a $200 buyer does not want
                      $200 refills. -->
                 <span class="sub" style="display:block;margin:2px 0 0">
-                  <template v-if="topupAuto">I authorize treg to charge my saved card <b>${{autoAmount}}</b> automatically whenever my balance drops below <b>${{autoThreshold}}</b>. Cancel any time from the billing page.</template>
+                  <template v-if="topupAuto">I authorize treg to charge my saved card <b>${{autoAmount}}</b> automatically whenever my balance drops below <b>${{autoThreshold}}</b>, up to <b>{{autoPerHour}}</b> times per hour. Cancel any time from the billing page.</template>
                   <template v-else>Calls fail with a 402 once the balance runs out. Turn this on to keep agents running without watching it.</template>
                 </span>
               </span>

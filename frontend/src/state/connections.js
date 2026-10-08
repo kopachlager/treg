@@ -205,7 +205,7 @@ async openResources(c){
         const d=await this.api('/connections/'+c.id+'/resources');
         if(!this.resPick || this.resPick.id!==c.id) return;  // user closed it or opened another
         this.resPick={id:c.id, label:d.resource_label||label, plural:d.resource_plural||plural,
-                      rows:d.resources||[], selected:d.selected||'', loading:false,
+                      rows:d.resources||[], selected:d.selected||'', loading:false, scoped:!!d.resource_scoped,
                       err:d.setup_required?(d.setup_detail||'Account setup is required.'):''};
         // Discovery can change the row underneath us — it backfills a missing label and records
         // that the credential works — so pull the list again rather than leaving stale text on screen.

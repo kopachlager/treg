@@ -79,7 +79,7 @@ def _provider_bindings(provider, secret: Secret) -> list[dict]:
         bindings = [{
             "secret_id": secret.id, "injector": "oauth", "location": "header",
             "name": "Authorization", "format": "Bearer {secret}",
-            "secret_field": provider.call_token_field,
+            "secret_field": _call_token_field(provider, secret),
         }]
     # A provider-required protocol header is a constant-format binding over the same encrypted
     # secret reference. `format` deliberately contains no {secret}: the existing injector stamps
@@ -96,6 +96,14 @@ def _provider_bindings(provider, secret: Secret) -> list[dict]:
             "name": provider.extra_credential_name, "format": "{secret}",
         })
     return bindings
+
+
+def _call_token_field(provider, secret: Secret) -> str:
+    """The blob field a call injects. A derived resource token exists only once a resource is
+    selected; until then the root token keeps the probe and the picker working."""
+    if provider.resource_token_path and not secret.resource_ref:
+        return "access_token"
+    return provider.call_token_field
 
 
 async def _autoprovision_provider_tool(
@@ -467,6 +475,7 @@ async def complete_oauth_connection(
                 await db.commit()
         return OAuthCallbackOutcome("exchange_failed")
 
+    reselect: tuple[int, str, str] | None = None
     # Phase 2 stores the result and provisions local rows. Re-read the pending row so two callback
     # deliveries cannot create two credentials after both complete their provider requests.
     async with session_maker() as db:
@@ -499,6 +508,11 @@ async def complete_oauth_connection(
             else:
                 secret.value = crypto.encrypt(json.dumps(blob))
                 secret.last_error = ""
+                # The new blob has no derived resource token. Unselect the resource so the tool
+                # binds the root token again, then derive the token anew once this commits.
+                if profile and profile.resource_token_path and secret.resource_ref:
+                    reselect = (secret.id, secret.resource_ref, secret.resource_name)
+                    secret.resource_ref, secret.resource_name = "", ""
             secret.provider = pending.provider or ""
             secret.authorization_method = pending.authorization_method or ""
             # granted_scopes stays canonically SPACE-joined whatever dialect went over the wire, so the
@@ -533,7 +547,36 @@ async def complete_oauth_connection(
             pending.status, pending.detail = "error", "connection storage failed"
             await db.commit()
             return OAuthCallbackOutcome("exchange_failed")
+    if reselect is not None:
+        await _reselect_after_reconnect(*reselect, org_id=pending.org_id,
+                                        client_factory=client_factory, provider=profile)
     return OAuthCallbackOutcome("connected")
+
+
+async def _reselect_after_reconnect(
+    secret_id: int, resource_ref: str, resource_name: str, *, org_id: int, client_factory,
+    provider,
+) -> None:
+    """Derive the selected resource's call token from a reconnected grant.
+
+    When the new grant no longer reaches the resource, the connection stays on its root token
+    and asks for a new selection instead of keeping a binding with nothing behind it."""
+    try:
+        await select_connection_resource(
+            secret_id=secret_id, resource_ref=resource_ref, resource_name=resource_name,
+            org_id=org_id, client_factory=client_factory,
+        )
+    except Exception as exc:  # noqa: BLE001 - the reconnect already committed; report, don't 500
+        print(f"[oauth] reselecting the resource after reconnect failed: {exc}")
+        async with session_maker() as db:
+            secret = await _owned_connection(secret_id, org_id, db)
+            secret.health_status = "setup_required"
+            secret.health_detail = (
+                f"Reconnected, but the selected {provider.resource_label} is no longer "
+                f"reachable. Select a {provider.resource_label} again."
+            )
+            secret.health_checked_at = _utcnow_naive()
+            await db.commit()
 
 
 async def connect_with_pasted_secret(
@@ -903,6 +946,8 @@ async def list_connection_resources(
         "provider": provider.service,
         "resource_label": provider.resource_label,
         "resource_plural": provider.resource_plural,
+        # A derived resource token reaches only the selected resource, so no other works per call.
+        "resource_scoped": bool(provider.resource_token_path),
         "selected": selected,
         "resources": resources,
         "setup_required": setup_required,

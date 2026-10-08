@@ -32,9 +32,10 @@ from test_marketplace_call import (  # noqa: F401
 OUT = b'{"detail":"Insufficient balance"}'  # matches the bare-402 balance signature
 
 
-async def _publish(provider: str, *, exhausted: bool, hours: float = 1.0, health: str | None = None):
+async def _publish(provider: str, *, exhausted: bool, hours: float = 1.0, health: str | None = None,
+                   ago: timedelta = timedelta(0)):
     now = utcnow_naive()
-    state = LatestState(provider, 0.0 if exhausted else 500.0, "USD", now, "exact",
+    state = LatestState(provider, 0.0 if exhausted else 500.0, "USD", now - ago, "exact",
                         exhausted_until=(now + timedelta(hours=hours)) if exhausted else None,
                         health=health or ("exhausted" if exhausted else "ok"))
     async with session_maker() as db:
@@ -249,6 +250,41 @@ async def test_clear_is_conditional_on_the_lock_id(clients: AsyncClient, platfor
     assert (await _lock("tikhub")).lock_id == lock.lock_id
     assert await capacity_marks.clear("tikhub", lock_id=lock.lock_id)
     assert await _lock("tikhub") is None
+
+
+async def _state(provider: str) -> LatestState:
+    async with session_maker() as db:
+        return LatestState.from_json(await ratestore.kv_get(db, STATE_NS, provider))
+
+
+async def test_a_sweep_reading_admits_a_probe_a_minute_and_its_2xx_lifts_it(clients: AsyncClient, platform_on, monkeypatch):
+    monkeypatch.setattr(call_service, "relay", _fake_relay(200, b'{"ok":true}'))
+    await _publish("tikhub", exhausted=True)
+    r = await clients.get(f"/call/{EP}?aweme_id=7")
+    assert r.status_code == 503, "the first probe waits a minute after the reading"
+    assert "once a minute" in r.json()["detail"]["message"]
+    await _publish("tikhub", exhausted=True, ago=timedelta(minutes=2))  # topped up since the reading
+    assert (await clients.get(f"/call/{EP}?aweme_id=7")).status_code == 200, "the probe is a real call"
+    assert (await _state("tikhub")).exhausted_until is None
+    assert (await clients.get(f"/call/{EP}?aweme_id=7")).status_code == 200, "open again for everyone"
+
+
+async def test_a_probe_through_a_sweep_reading_that_fails_keeps_it(clients: AsyncClient, platform_on, monkeypatch):
+    monkeypatch.setattr(call_service, "relay", _fake_relay(402, OUT))
+    await _publish("tikhub", exhausted=True, ago=timedelta(minutes=2))
+    assert (await clients.get(f"/call/{EP}?aweme_id=7")).status_code == 402, "the probe relays"
+    assert (await _state("tikhub")).exhausted_until is not None
+    assert (await clients.get(f"/call/{EP}?aweme_id=7")).status_code == 503, "one probe a minute"
+
+
+async def test_a_probe_never_lifts_a_newer_sweep_reading(clients: AsyncClient, platform_on):
+    await _publish("tikhub", exhausted=True, ago=timedelta(minutes=2))
+    old = capacity_marks.sweep_probe_id((await _state("tikhub")).observed_at)
+    await _publish("tikhub", exhausted=True)
+    assert not await capacity_marks.clear_sweep_state("tikhub", probe_id=old)
+    assert (await _state("tikhub")).exhausted_until is not None
+    new = capacity_marks.sweep_probe_id((await _state("tikhub")).observed_at)
+    assert await capacity_marks.clear_sweep_state("tikhub", probe_id=new)
 
 
 async def test_the_sweep_cannot_undo_a_call_path_lock(clients: AsyncClient, platform_on, monkeypatch):

@@ -1924,10 +1924,11 @@ endpoints:
   capability: walmart.product.detail
 - id: serpapi.x.home-depot-search
   tier: extended
-  platform: web
+  capability: home-depot.products.search
+  platform: home-depot
   method: GET
   path: /search
-  name: "Home Depot product search by keyword"
+  name: "Search Home Depot products"
   summary: Live Home Depot search results for a keyword
   input:
     queryParams:

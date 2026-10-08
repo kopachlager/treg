@@ -18,6 +18,11 @@ Faithfulness contract — it alters ONLY these, everything else is relayed verba
      under the same label — and the ownership record would then make B its owner (reproduced live
      against LeadsForge, 2026-09-09). The caller loses nothing: treg's own idempotency table already
      replays their answer for the same label. A team's own key relays the header verbatim.
+  5. on treg's SHARED key only, the caller's `User-Agent` is replaced by treg's own
+     (`TREG_USER_AGENT`, by `identify_as_treg`). The provider sees treg's account there, and a
+     library default such as Python's is read as bot traffic: Cloudflare rules answered 403 (error
+     1010) to every `Python-urllib` call on LimaData, and to Wiza's phone reveals for a day, both on
+     treg's key. A team's own key relays the caller's header verbatim.
 
 Except for that explicit JSON-binding contract, it never buffers the body (rule 5: stream, don't
 duplicate) and uses the shared long-lived httpx client (rule 1: keepalive). Secrets are passed
@@ -35,7 +40,7 @@ import httpx
 
 from ... import crypto
 from ...application.call.types import GatewayFailed, UpstreamRequest, UpstreamResponse
-from ...config import get_settings
+from ...config import TREG_USER_AGENT, get_settings
 from ...models import Secret, Tool
 from . import injectors
 
@@ -78,6 +83,13 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError(f"duplicate JSON object key: {name}")
         result[name] = value
     return result
+
+
+def identify_as_treg(raw_headers: tuple[tuple[bytes, bytes], ...]) -> tuple[tuple[bytes, bytes], ...]:
+    """Rewrite 5 of the faithfulness contract: on treg's shared key the caller's User-Agent becomes
+    treg's own (see the module docstring for the providers that blocked library defaults)."""
+    kept = tuple((k, v) for k, v in raw_headers if k.lower() != b"user-agent")
+    return kept + ((b"user-agent", TREG_USER_AGENT.encode()),)
 
 
 def scope_shared_idempotency_key(

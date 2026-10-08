@@ -7124,7 +7124,7 @@ endpoints:
   platform: web
   method: GET
   path: /api/search/v1
-  name: "Search Chinese news, Weibo, WeChat, and more by keyword"
+  name: "Search Chinese news and social"
   summary: Searches recent content across news, Weibo, WeChat, Zhihu, Douyin, Xiaohongshu, Bilibili, and Kuaishou with source and time filters.
   docs_url: https://docs.justoneapi.com/en/api/social-media/cross-platform-search-v1
   cost:

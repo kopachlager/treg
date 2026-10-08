@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
+import json
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import case, func, or_, text
 from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -20,7 +22,7 @@ from ..config import get_settings
 from ..infra import kv
 from ..infra.db import get_admin_session
 from ..domain import money
-from ..models import ArchiveEndpointStat, ArchiveKey, ArchiveSnapshot, Bundle, CallRecord, LedgerEntry, Membership, Org, Referral, Secret, Tool, User
+from ..models import ArchiveEndpointStat, ArchiveKey, ArchiveSnapshot, Bundle, CallRecord, EndpointDayStat, LedgerEntry, Membership, Org, Referral, Secret, Tool, User
 from ..timeutil import as_naive as _as_naive
 from ..timeutil import utcnow_naive as _utcnow_naive
 from ..domain.identity.access import require_superadmin
@@ -41,55 +43,65 @@ def _tally(items) -> dict:
 
 @app.get("/admin/stats")
 async def admin_stats(_: str = Depends(require_superadmin), db: AsyncSession = Depends(get_admin_session)) -> dict:
-    async def n(model) -> int:
-        return (await db.execute(select(func.count()).select_from(model))).scalar() or 0
+    """Platform totals for the admin page. Every count runs in the database.
 
-    tools = (await db.execute(select(Tool))).scalars().all()
-    secrets = (await db.execute(select(Secret))).scalars().all()
-    # THREE COLUMNS, not the whole row. This is an unbounded read of the largest table in the
-    # database (tens of thousands of rows), and every one of them was being materialised as a full
-    # ORM object to count three fields. It matters more now that `callrecord` carries the failure
-    # evidence columns, which are wide and are read by nothing here.
-    calls = (await db.execute(
-        select(CallRecord.org_id, CallRecord.created_at, CallRecord.status_code))).all()
-    users = (await db.execute(select(User))).scalars().all()
-    orgs = (await db.execute(select(Org))).scalars().all()
-    # Sandbox onboarding data isn't real platform usage — exclude the demo footprint from totals so
-    # metrics stay honest (fake teammates, demo teams, and everything scoped to them).
-    demo_org_ids = {o.id for o in orgs if o.demo}
-    users = [u for u in users if not u.demo]
-    orgs = [o for o in orgs if not o.demo]
-    tools = [t for t in tools if t.org_id not in demo_org_ids]
-    secrets = [s for s in secrets if s.org_id not in demo_org_ids]
-    calls = [c for c in calls if c.org_id not in demo_org_ids]
+    Loading the whole call table to count it in Python ran past the request timeout at production
+    size, so the page got a 502. Call counts now come from `endpointdaystat` (one row per endpoint
+    per day, folded by the `treg-worker catalog stats` cron): calls the provider saw, as of that
+    job's last run. The all-time total is Postgres's own row estimate, not an exact count.
+    """
     now = _utcnow_naive()
+    demo_orgs = select(Org.id).where(Org.demo)
 
-    def since(rows, days, pred=lambda r: True):
-        cut = now - timedelta(days=days)
-        return sum(1 for r in rows if _as_naive(r.created_at) >= cut and pred(r))
+    async def n(stmt) -> int:
+        return int((await db.execute(stmt)).scalar() or 0)
 
-    ok = sum(1 for c in calls if c.status_code < 400)
+    def recent(model, days: int):
+        return model.created_at >= now - timedelta(days=days)
+
+    users = select(func.count()).select_from(User).where(User.demo.is_(False))
+    orgs = select(func.count()).select_from(Org).where(Org.demo.is_(False))
+    # `or_(is_(None))`: NOT IN drops a NULL org_id, and a tool or secret with no team still counts.
+    tools = (await db.execute(select(Tool).where(
+        or_(Tool.org_id.is_(None), Tool.org_id.not_in(demo_orgs))))).scalars().all()
+    secret_health = (await db.execute(select(Secret.health_status).where(
+        or_(Secret.org_id.is_(None), Secret.org_id.not_in(demo_orgs))))).scalars().all()
+
+    async def calls_since(days: int) -> tuple[int, int]:
+        day = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        row = (await db.execute(select(func.sum(EndpointDayStat.n), func.sum(EndpointDayStat.ok))
+                                .where(EndpointDayStat.day >= day))).one()
+        return int(row[0] or 0), int(row[1] or 0)
+
+    calls_7d, _ok_7d = await calls_since(7)
+    calls_30d, ok_30d = await calls_since(30)
+    if db.bind.dialect.name == "postgresql":
+        total_calls = await n(text(
+            "SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = 'callrecord'::regclass"))
+    else:
+        total_calls = await n(select(func.count()).select_from(CallRecord))
     return {
         "totals": {
-            "users": len(users), "orgs": len(orgs), "tools": len(tools),
-            "secrets": len(secrets), "bundles": await n(Bundle), "calls": len(calls),
-            "superadmins": sum(1 for u in users if u.is_superadmin),
-            "suspended_orgs": sum(1 for o in orgs if o.suspended),
+            "users": await n(users), "orgs": await n(orgs), "tools": len(tools),
+            "secrets": len(secret_health), "bundles": await n(select(func.count()).select_from(Bundle)),
+            "calls": total_calls,
+            "superadmins": await n(users.where(User.is_superadmin)),
+            "suspended_orgs": await n(orgs.where(Org.suspended)),
         },
         "tools_by_injector": _tally(b.get("injector", "?") for t in tools for b in t.bindings),
         "tools_by_host": _tally(t.host for t in tools),
-        "credential_health": _tally(s.health_status for s in secrets),
+        "credential_health": _tally(secret_health),
         "calls": {
-            "last_7d": since(calls, 7), "last_30d": since(calls, 30), "total": len(calls),
-            "success_rate": round(ok / len(calls), 3) if calls else None,
+            "last_7d": calls_7d, "last_30d": calls_30d, "total": total_calls,
+            "success_rate": round(ok_30d / calls_30d, 3) if calls_30d else None,
         },
         "growth": {
-            "new_users_7d": since(users, 7), "new_users_30d": since(users, 30),
-            "new_orgs_7d": since(orgs, 7), "new_orgs_30d": since(orgs, 30),
+            "new_users_7d": await n(users.where(recent(User, 7))),
+            "new_users_30d": await n(users.where(recent(User, 30))),
+            "new_orgs_7d": await n(orgs.where(recent(Org, 7))),
+            "new_orgs_30d": await n(orgs.where(recent(Org, 30))),
         },
     }
-
-
 
 
 @app.get("/admin/orgs")
@@ -175,14 +187,90 @@ async def admin_tools(_: str = Depends(require_superadmin), db: AsyncSession = D
              "host": t.host, "owner": t.owner, "injectors": [b.get("injector") for b in t.bindings]} for t in tools]
 
 
+@app.get("/admin/share")
+async def admin_share(
+    minutes: int = 60, _: str = Depends(require_superadmin), db: AsyncSession = Depends(get_admin_session)
+) -> dict:
+    """Who served each job over the last `minutes` (at most 360). `requests` counts what callers
+    asked (direct calls and routed parents, never a routed attempt); `by_provider` counts the 2xx
+    answers each provider gave, directly or as a routed attempt. One read over an id range."""
+    from ..application import catalog_stats
+    from ..domain.catalog import store as catalog_store
+    minutes = max(1, min(minutes, 360))
+    since = _utcnow_naive() - timedelta(minutes=minutes)
+    first = await catalog_stats._first_id_at(db, since)
+    attempt = CallRecord.call_ref.like("%:r%")
+    ok = case((CallRecord.status_code.between(200, 299), 1), else_=0)
+    rows = (await db.execute(
+        select(CallRecord.endpoint_id, CallRecord.provider, attempt, func.count(), func.sum(ok))
+        .where(CallRecord.id >= first, CallRecord.endpoint_id.is_not(None))
+        .group_by(CallRecord.endpoint_id, CallRecord.provider, attempt))).all()
+    by_id = catalog_store.load().by_id
+
+    def capability(endpoint_id: str) -> str:
+        cap = (by_id.get(endpoint_id) or {}).get("capability")
+        return cap or (endpoint_id[len("treg."):] if endpoint_id.startswith("treg.") else "(none)")
+
+    jobs: dict[str, dict] = {}
+    for endpoint_id, provider, is_attempt, n, n_ok in rows:
+        job = jobs.setdefault(capability(endpoint_id), {"requests": 0, "answered": 0, "by_provider": {}})
+        if not is_attempt:
+            job["requests"] += n
+            job["answered"] += int(n_ok or 0)
+        if provider and provider != "treg" and n_ok:
+            job["by_provider"][provider] = job["by_provider"].get(provider, 0) + int(n_ok)
+    ordered = sorted(jobs.items(), key=lambda kv: -kv[1]["requests"])
+    return {"since": since.isoformat(), "minutes": minutes,
+            "jobs": [{"capability": cap, **job} for cap, job in ordered]}
+
+
+def _error_reason(text: str | None) -> str | None:
+    """A short failure reason from a stored error answer: the upstream's own `reason`, `error`,
+    `code` or `message` when the body is JSON, else its first characters."""
+    if not text or text == _ERROR_EVIDENCE_EXPIRED:
+        return None
+    body = re.sub(r"^\[[^\]]*\]\s*", "", text).strip()
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        doc = None
+    if isinstance(doc, dict):
+        for key in ("reason", "error", "code", "message"):
+            value = doc.get(key)
+            if isinstance(value, dict):
+                value = value.get("code") or value.get("message")
+            if isinstance(value, str) and value:
+                return value[:120]
+    return body[:120] or None
+
+
 @app.get("/admin/calls")
 async def admin_calls(
-    limit: int = 50, _: str = Depends(require_superadmin), db: AsyncSession = Depends(get_admin_session)
+    limit: int = 50, since_id: int | None = None, provider: str | None = None,
+    _: str = Depends(require_superadmin), db: AsyncSession = Depends(get_admin_session)
 ) -> list[dict]:
+    """The newest calls, or with `since_id` the calls after that id, oldest first, so a poller
+    advances its cursor to the last id it read. `provider` needs `since_id`: it keeps the read a
+    range over the primary key instead of a walk back through the whole table. A failed call carries
+    `error_reason`, the upstream's own short reason from its stored error answer."""
     limit = max(1, min(limit, 1000))
-    rows = (await db.execute(select(CallRecord).order_by(CallRecord.id.desc()).limit(limit))).scalars().all()
+    if provider and since_id is None:
+        raise HTTPException(422, "provider needs since_id")
+    q = select(CallRecord)
+    if since_id is not None:
+        q = q.where(CallRecord.id > since_id).order_by(CallRecord.id.asc())
+    else:
+        q = q.order_by(CallRecord.id.desc())
+    if provider:
+        q = q.where(CallRecord.provider == provider)
+    rows = (await db.execute(q.limit(limit))).scalars().all()
     return [{"id": c.id, "org_id": c.org_id, "user": c.user_email, "tool": c.tool_name,
-             "method": c.method, "status": c.status_code, "at": c.created_at.isoformat()} for c in rows]
+             "method": c.method, "status": c.status_code, "at": c.created_at.isoformat(),
+             "endpoint_id": c.endpoint_id, "provider": c.provider, "tier": c.credential_tier,
+             "call_ref": c.call_ref, "charged_micro": c.cost_charged_micro,
+             "observed_micro": c.cost_observed_micro, "duration_ms": c.duration_ms,
+             "upstream_ms": c.upstream_ms, "cached": c.cached,
+             "error_reason": _error_reason(c.error_response)} for c in rows]
 
 
 _ERROR_EVIDENCE_TTL_DAYS = evidence_retention.ERROR_EVIDENCE_TTL_DAYS

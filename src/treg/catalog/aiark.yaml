@@ -181,6 +181,10 @@ endpoints:
     method: POST
     path: /v1/people/reverse-lookup
     name: Reverse lookup a person
+    miss:
+      status: 404
+      when: "error == 'data not found'"
+      means: "no person on record for this email (404 with error 'data not found') — a normal, free outcome. Its rare HTML 404 page is a real routing error."
     summary: Enrich a person profile from an email address.
     input:
       bodyType: json

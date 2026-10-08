@@ -592,13 +592,13 @@ endpoints:
     summary: "Structured filters (or a natural-language query) → matching companies with firmographics, socials, revenue band, headcount band and how many contacts are available for each"
     input:
       body:
-        filters: {type: object, required: false, note: "structured criteria — arrays of values per field, e.g. {\"country\":[\"IE\"],\"industry\":[\"Financial Services\"]}", example: {country: ["IE"], industry: ["Financial Services"]}}
+        filters: {type: object, required: false, note: "structured criteria — each field an {include, exclude} object, e.g. {\"location_country\":{\"include\":[\"IE\"]},\"industry\":{\"include\":[\"financial services\"]}}; fields: company, industry, keywords, location_city, location_country, location_state, size, founded, revenue. The older flat {\"country\":[...]} shape is silently ignored", example: {location_country: {include: ["IE"]}, industry: {include: ["financial services"]}}}
         query: {type: string, required: false, note: "natural-language search, 8-100 chars. WARNING: this mode failed live with 422 {\"type\":\"openai_error\"} — it routes through an LLM upstream and is not reliable. Prefer `filters`"}
         page: {type: integer, required: false, note: "1-1000, default 1"}
         webhook_url: {type: string, required: false, note: "deliver the results asynchronously instead"}
       note: "POST with Content-Type: application/json. Either filters or query"
     test_request:
-      body: {filters: {country: ["IE"], industry: ["Financial Services"]}, page: 1}
+      body: {filters: {location_country: {include: ["IE"]}, industry: {include: ["financial services"]}}, page: 1}
     cost:
       type: per_call
       value: 1
@@ -621,7 +621,7 @@ endpoints:
     scope: any_account
     method: GET
     path: /v1/domain-status
-    name: "Is a domain disposable or free webmail"
+    name: "Check email domain status"
     summary: "Domain → two booleans: whether it is a disposable/throwaway mail host and whether it is a free webmail provider — the cheap pre-filter before signup or lead acceptance"
     input:
       queryParams:

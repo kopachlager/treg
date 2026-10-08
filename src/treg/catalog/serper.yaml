@@ -30,6 +30,7 @@ endpoints:
       bodyType: json
       body:
         q: {type: string, required: true, example: "OpenAI API documentation"}
+        num: {type: integer, required: false, default: 10, min: 10, max: 100}
         location: {type: string, required: false, note: "Canonical Google location name; discover supported values with Serper's public /locations route.", example: "New York, New York, United States"}
         gl: {type: string, required: false, default: us, note: "Two-letter country code.", example: us}
         hl: {type: string, required: false, default: en, note: "Google interface language code.", example: en}
@@ -165,6 +166,7 @@ endpoints:
         location: {type: string, required: false}
         gl: {type: string, required: false, default: us, example: us}
         hl: {type: string, required: false, default: en, example: en}
+        num: {type: integer, required: false, min: 1, max: 100, note: "Requested article count."}
         tbs: {type: string, required: false, note: "Google date filter. A valid but over-restrictive value can return HTTP 200 with an empty news array and still costs one credit."}
         page: {type: integer, required: false, default: 1, min: 1}
         autocorrect: {type: boolean, required: false, default: true}

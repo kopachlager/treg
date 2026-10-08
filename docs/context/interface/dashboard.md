@@ -5,6 +5,7 @@ sources:
   - frontend/src/App.vue
   - frontend/src/views.ts
   - frontend/src/state/controller.js
+  - frontend/src/state/catalog.js
   - frontend/src/styles/base.css
   - frontend/e2e/layout.spec.ts
   - src/treg/web/media/redesign/dashboard.css
@@ -102,9 +103,9 @@ this page keeps what no single file shows. The look follows the root `design.md`
   did not read as a job.
 - The Catalog box (`CatalogSearch.vue`) asks the finder when typing pauses (700 ms) on two
   characters or more. That auto answer is a section above the still-filtered shelves (a platform
-  name keeps filtering and gets its answer too), and while it reads, or when it is `none` or empty,
-  it is one line. Enter (or the suggestion row) asks for the full answer (`findFull`): shelves
-  unfiltered and lit where it landed.
+  or provider name filters those shelves using both provider IDs and display names). While it reads,
+  or when it is `none` or empty, it is one line. Enter (or the suggestion row) asks for the full
+  answer (`findFull`): shelves unfiltered and lit where it landed.
 - A find result opens its job (`findOpen`): the job's comparison on its platform when that shelf
   compares it, else the tool in the drawer; from the Catalog page the shelf loads first and the
   comparison replaces its history entry. Back returns to the Catalog page with the box, the answer

@@ -47,6 +47,8 @@ GET-to-HEAD widening, the OpenAPI wrapper that hides
 implied HEAD operations and gives each method of a multi-method route its own operation id, shared HTTP client creation, startup work, shutdown drains, and the Ads
 conversion worker. Registration order is compatibility behavior. The four stage-0 snapshots stay
 byte-identical for `role="all"` unless that composition intentionally changes.
+`dump_surface._composition` omits the local-only `_DevTitleMiddleware` from its
+deployment-independent snapshot; `tests/test_dev_title.py` checks that middleware separately.
 
 When archive settings select R2, the lifespan validates object-store configuration before DB
 verification, then owns the asynchronous client until archive and analytics drains finish. This

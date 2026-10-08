@@ -57,6 +57,11 @@ Linkup uses a pasted Bearer key at `https://api.linkup.so`. Its free internal
 exposing the account balance as a catalog tool. `TREG_PLATFORM_KEY_LINKUP` supplies the optional
 shared binding; a team's own key wins and remains unmetered by treg.
 
+Crawl4AI uses a pasted Bearer key (`sk_live_…`) at `https://api.crawl4ai.com`. The free
+`GET /v1/billing/balance` validates a connected key (a bogus key answers 401) and supplies capacity
+evidence; it trails the per-call `x-c4-balance` header by about a minute. `TREG_PLATFORM_KEY_CRAWL4AI`
+supplies the optional shared binding; a team's own key wins and remains unmetered by treg.
+
 Spider uses a pasted Bearer key at `https://api.spider.cloud`. The free internal
 `GET /data/credits` probe validates connected keys and supplies capacity evidence.
 `TREG_PLATFORM_KEY_SPIDERCLOUD` supplies the optional shared binding; the own-key-first ladder
@@ -89,6 +94,15 @@ invalid-number sandbox fixture. The typed `probe_cost_micro=15000` marks the fir
 the connect dialog renders the warning from that field, and provisioning deliberately omits it from
 the tool health check so later health runs cannot spend the team's provider wallet.
 `TREG_PLATFORM_KEY_TRESTLEIQ` supplies the optional shared binding; a team's own key still wins.
+
+`HLRLOOKUP` reuses the Adyntel pattern: `api_key` and `api_secret` are both `location: json`
+bindings, and the relay has no HLR Lookup branch. HLR Lookup does not sign or hash the raw body, so
+JSON re-serialization is safe. The free `POST /apiv2/balance` probe answers 401 when either half of
+the pair is wrong, but 400 to a key sent alone, valid or not. The first connect step therefore
+stores a team key unchecked (declared `probe_deferred_statuses=(400,)`), and adding the secret does
+not re-probe the pair: a wrong team pair surfaces as the provider's unbilled 401 on the first call.
+Tier 4 reads `TREG_PLATFORM_KEY_HLRLOOKUP` and `TREG_PLATFORM_KEY_HLRLOOKUP_SECRET`
+(`platform_extra_setting`), so a team's own pair never rides with treg's secret.
 
 `LIMADATA` uses a pasted raw `x-api-key` header. Its free connection probe sends an invalid empty
 web-search body: the assigned key returns HTTP 400 and a bogus key returns 401. The real local
@@ -331,12 +345,19 @@ request. For Instagram, that request subscribes the Page to the app's
 `messages,messaging_postbacks` fields. The setup is scope-gated, so read/post-only connections do
 not attempt it. Provider discovery and setup HTTP calls run after the read database session closes;
 the result is written in a new short transaction. Resource listings and
-connection views never include the Page token; existing Instagram connections must reconnect or
-reselect their account once to populate it. The token and object id are separate concerns: Instagram
+connection views never include the Page token; existing connections must reselect their account
+once to populate it. The token and object id are separate concerns: Instagram
 profile/media operations still target the Instagram account id, while Facebook-login inbox sync is
 the Page messaging surface—`/{page_id}/conversations?platform=instagram` for listing and
 `/{page_id}/messages` for replies. Calling the conversations edge with the Instagram account id
 produces Meta error `(#3)` despite a valid Page token.
+Facebook Pages uses the same lookup without the setup request: every Page edge rejects the user
+token (code 190 / subcode 2069032), so selecting a Page stores that Page's token as
+`page_access_token`, and one Facebook connection acts on one Page. Until a resource is selected,
+`_provider_bindings` binds the root `access_token`, so the probe and the picker work before the
+derived token exists. A reconnect replaces the whole blob, so the callback unselects the resource
+and, after its commit, derives the token again from the new grant. When the new grant no longer
+reaches that resource, the connection stays on the root token and reports `setup_required`.
 Google Search Console's hand-written tool example calls out its distinct direct-tool convention:
 substitute `{site_url}` with a value encoded exactly once (`sc-domain%3Aexample.com`), and never encode
 again a property identifier returned by the sites list.

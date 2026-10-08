@@ -228,9 +228,30 @@ def test_async_descriptor_must_be_a_mapping():
     assert any("async must be a mapping" in error for error in _async_errors([]))
 
 
-def test_async_descriptor_requires_per_success_cost():
-    errors = _async_errors(_valid_async(), {"type": "per_call"})
-    assert any("cost.type per_success" in error for error in errors)
+def test_async_descriptor_requires_per_success_or_per_call_cost():
+    assert _async_errors(_valid_async(), {"type": "per_call"}) == []
+    errors = _async_errors(_valid_async(), {"type": "per_result"})
+    assert any("cost.type per_success or per_call" in error for error in errors)
+
+
+def test_async_descriptor_bounded_by_max_age_may_have_no_failure_word():
+    descriptor = _valid_async()
+    del descriptor["status"]["failure"]
+    assert any("failure (optional with max_age)" in error for error in _async_errors(descriptor))
+    descriptor.update(max_age=300, terminal_on_submission=True)
+    assert _async_errors(descriptor) == []
+
+
+@pytest.mark.parametrize(("key", "value", "message"), [
+    ("max_age", 0, "async.max_age must be a positive number"),
+    ("max_age", 86401, "async.max_age must be a positive number"),
+    ("max_age", True, "async.max_age must be a positive number"),
+    ("terminal_on_submission", False, "terminal_on_submission must be true"),
+])
+def test_async_descriptor_rejects_invalid_bounds(key, value, message):
+    descriptor = _valid_async()
+    descriptor[key] = value
+    assert any(message in error for error in _async_errors(descriptor))
 
 
 def test_async_descriptor_rejects_non_get_or_non_utility_targets():
@@ -988,3 +1009,21 @@ def test_a_fixed_price_spools_when_its_success_rule_is_declared():
     errors: list[str] = []
     validator.check_spooled_response(ep, None, "x", errors)
     assert errors == []
+
+
+def test_the_fast_catalog_loader_reads_every_file_like_the_pure_python_one():
+    """`store._Loader` uses libyaml's C parser when it is installed; every shipped catalog file must
+    parse to the same document as with the pure-Python SafeLoader, timestamps kept as strings."""
+    import yaml
+    from treg.domain.catalog import store
+
+    class Pure(yaml.SafeLoader):
+        pass
+    Pure.yaml_implicit_resolvers = store._Loader.yaml_implicit_resolvers
+    if not getattr(yaml, "__with_libyaml__", False):
+        pytest.skip("libyaml not installed")
+    assert issubclass(store._Loader, yaml.CSafeLoader)
+    for path in sorted(store.CATALOG_DIR.rglob("*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        assert yaml.load(text, Loader=store._Loader) == yaml.load(text, Loader=Pure), path.name  # noqa: S506
+    assert yaml.load("checked: 2026-09-01", Loader=store._Loader) == {"checked": "2026-09-01"}  # noqa: S506

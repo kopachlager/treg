@@ -1647,7 +1647,10 @@ async def test_change_observation_failure_preserves_record(clients, shadow, monk
             await asyncio.Event().wait()
         return None
     monkeypatch.setattr(archive, "_read_change_body", unavailable)
-    monkeypatch.setattr(archive, "_CHANGE_TIMEOUT_S", 0.05)
+    if failure == "timeout":
+        # The same timeout also bounds the write's own snapshot lookup: too short and a busy test
+        # run times that out instead, and the counts drift.
+        monkeypatch.setattr(archive, "_CHANGE_TIMEOUT_S", 0.5)
     before = archive.change_outcomes.copy()
     monkeypatch.setattr(call_service, "relay", _fake_relay(200, b'{"new":42}'))
     assert (await clients.get(f"/call/{EP}?aweme_id=7")).status_code == 200

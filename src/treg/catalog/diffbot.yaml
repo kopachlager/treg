@@ -231,3 +231,24 @@ endpoints:
     verified: 2026-07-28
     example_response: examples/diffbot.companies.bulk_enrich.json
     docs_url: https://docs.diffbot.com/reference/introduction-to-enhance-api
+
+  - id: diffbot.x.web-search
+    capability: web.search
+    platform: web
+    host: llm.diffbot.com
+    method: GET
+    path: /api/v1/web_search/
+    name: "Web search shaped for an LLM context window"
+    summary: "Search the web and return results shaped for feeding into an LLM context window"
+    input:
+      queryParams:
+        text: {type: string, required: true, note: "the search query"}
+        size: {type: integer, required: false, note: "number of results to return", example: 10}
+        maxTokens: {type: integer, required: false, note: "caps the search response to this token budget; highlight chunks are reduced equitably"}
+      note: "llm.diffbot.com requires Bearer authorization instead of Diffbot's usual query token; the approved catalog target applies that profile"
+    test_request:
+      queryParams: {text: "knowledge graph AI", size: 3}
+    cost: {type: per_call, value: 1, currency: credit, per: 1, unit: call, source: docs, source_url: "https://www.diffbot.com/pricing", checked: '2026-10-02', confidence: documented, note: "One Diffbot credit per web search."}
+    verified: 2026-07-28
+    example_response: examples/diffbot.x.web-search.json
+    docs_url: https://docs.diffbot.com/reference/web-search-get

@@ -224,8 +224,8 @@ class Catalog:
         event — one search credit, one started block — which is what a live successful call
         actually bills and what `usd_per_call` must say. Settlement still reads `usd`.
         """
-        if not cost:
-            return None
+        if not cost or cost.get("varies"):
+            return None  # a routed row whose children bill misses: the note carries the range
         shown = cost.get("display_usd")
         if isinstance(shown, (int, float)) and not isinstance(shown, bool):
             return shown
@@ -297,7 +297,14 @@ def load(*, refresh: bool = False, directory: Path | None = None) -> Catalog:
     return _CACHE
 
 
-class _Loader(yaml.SafeLoader):
+# libyaml's C parser reads the catalog about 9x faster than the pure-Python one (141 files: 7.7 s ->
+# 0.9 s), with the same safe constructor and the same resolvers, so the documents are identical.
+# A worker process pays the whole load on its first call; at pure-Python speed that was ~27 s on a
+# small instance, longer than the async worker's per-poll timeout.
+_SafeBase = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+class _Loader(_SafeBase):
     """SafeLoader that keeps timestamps as the strings they were written as. The validator accepts
     `checked: 2026-09-01` unquoted, and a `date` object in a served row breaks every plain
     `json.dumps` of it (the /catalog/find stream did exactly that on the video-gen rows)."""
@@ -1118,6 +1125,7 @@ def _haystacks(ep: dict, cat: Catalog) -> list[tuple[int, str]]:
     plat = cat.platforms.get(ep["platform"], {})
     return [
         (W_CAPABILITY, " ".join((ep["capability"], cat.capabilities.get(ep["capability"], ""),
+                                 cat.capability_titles.get(ep["capability"], ""),
                                  plat.get("label", ""), ep["platform"])).lower()),
         # `name` is OURS to word (summary stays the provider's, verbatim) — it is the one
         # per-endpoint field curation may write search vocabulary into, so it must be searched

@@ -15,8 +15,8 @@ name? - and a name is answered with the platform or provider it names, under its
 
 Two phases, because the recall is instant and the judge is not: `stream` yields the candidates
 first and the judged rows when they arrive, and the pages animate the wait on the first event. The
-judge abstains rather than fails (see `infra.judge`); an abstaining judge falls back to the keyword
-page, labelled as such, never to an error.
+judge abstains rather than fails (see `infra.judge`); an unambiguous provider name still opens that
+provider's tools, and other abstentions fall back to the keyword page, never to an error.
 
 Two engines behind `find_engine` (docs/context/architecture/find.md). v1, above: endpoint recall.
 v2: recall by JOB (`domain.catalog.find_recall`), so one judge seat carries every vendor of a job,
@@ -201,12 +201,21 @@ async def judge(query: str, cands: list[tuple[dict, float]], cat: catalog_store.
                                 url=s.typesafe_url, timeout_s=float(s.find_timeout_s),
                                 criteria=FIT_CRITERIA, extra={"name": NAME_QUESTION} if views else None)
     if j.probs is None:
+        hit = find_recall.name_of(query, find_recall.index(cat), platform, provider_display)
+        if hit and hit.kind == "provider":
+            return Judged(NAME, [(ep, None) for ep in name_page(hit, cat, platform)], j,
+                          named="provider")
         page, _, _ = catalog_store.rank_band(query, cat, 25, platform)
         return Judged(KEYWORD, [(ep, None) for ep, _ in page[:25]], j)
     keep, high = float(s.search_judge_keep), float(s.search_judge_high)
     scored = sorted(zip((ep for ep, _ in cands), j.probs), key=lambda t: -t[1])
     strong = bool(scored) and scored[0][1] >= high
     kept = [(ep, p) for ep, p in scored if p >= keep]
+    if not strong:
+        hit = find_recall.name_of(query, find_recall.index(cat), platform, provider_display)
+        if hit and hit.kind == "provider":
+            return Judged(NAME, [(ep, None) for ep in name_page(hit, cat, platform)], j,
+                          kept, "provider")
     if not strong and ((j.extra or {}).get("name", 0.0) >= float(s.find_name_min)
                        or (not platform and names_a_platform(query, cat))):
         named, rows = name_rows(query, cat, provider_display, platform)
@@ -428,6 +437,9 @@ def decide(query: str, cands: list[find_recall.Candidate], j: judge_infra.Judgem
     """
     s = get_settings()
     if j.probs is None:
+        hit = find_recall.name_of(query, ix, platform, provider_display)
+        if hit and hit.kind == "provider":
+            return Found(NAME, j, cands, name=hit)
         return Found(KEYWORD, j, cands, reason=j.error or "")
     keep, high = float(s.search_judge_keep), float(s.search_judge_high)
     scored = sorted(zip(cands, j.probs), key=lambda t: -t[1])

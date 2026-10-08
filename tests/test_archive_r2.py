@@ -304,7 +304,10 @@ async def test_legacy_initialization_keeps_db_baseline_when_r2_precompare_times_
         attempted.set()
         await asyncio.Event().wait()
     monkeypatch.setattr(r2, 'get', stalled_get)
-    monkeypatch.setattr(archive, '_CHANGE_TIMEOUT_S', 0.1)
+    # The bound also covers the database reads before the R2 get; 0.1 s could expire there under a
+    # loaded parallel run, never reaching the stalled get this test is about. The get never returns,
+    # so a wider bound still ends in the timeout.
+    monkeypatch.setattr(archive, '_CHANGE_TIMEOUT_S', 1.0)
     await archive._store(**common, body=b'{}')  # Unknown must preserve the previous decisive result.
     assert attempted.is_set()
     async with db.session_maker() as s:

@@ -139,7 +139,7 @@ platProviders(){  // providers with endpoints here, in catalog order
           // curated name exists; the clip guards the rows where one does not yet.
           title:this.clip(r.title||r.description, 90),
           mgmt: eps.every(e=>e.kind==='account'||e.kind==='utility'),
-          hay: (r.description+' '+r.domain+' '+(r.capability||'')+' '+eps.map(e=>
+          hay: ((r.title||'')+' '+r.description+' '+r.domain+' '+(r.capability||'')+' '+eps.map(e=>
                  e.provider+' '+(e.provider_display||'')+' '+(e.name||'')+' '+e.path+' '+e.summary).join(' ')).toLowerCase()});
       }
       return out; },

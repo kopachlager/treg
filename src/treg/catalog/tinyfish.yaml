@@ -48,12 +48,12 @@ endpoints:
         language: {type: string, required: false, example: en}
         include_domains: {type: "array[string]", required: false}
         exclude_domains: {type: "array[string]", required: false}
-        after_date: {type: string, required: false, note: "Only results after this date."}
-        before_date: {type: string, required: false, note: "Only results before this date."}
+        after_date: {type: string, required: false, note: "YYYY-MM-DD; only results after this date.", example: "2024-01-01"}
+        before_date: {type: string, required: false, note: "YYYY-MM-DD; only results before this date.", example: "2024-12-31"}
         recency_minutes: {type: integer, required: false, min: 1}
         page: {type: integer, required: false, default: 0, min: 0, max: 10}
         include_thumbnail: {type: boolean, required: false, default: false}
-        fetch: {type: boolean, required: false, default: false, note: "Attach fetched page content to results."}
+        fetch: {type: object, required: false, note: "JSON object in the query string; {} attaches each result's fetched page content. A boolean is rejected (400 INVALID_INPUT).", example: {}}
     test_request: {queryParams: {query: "TinyFish API documentation", domain_type: web}}
     cost: {type: free, value: 0, currency: USD, unit: call, source: docs, source_url: "https://www.tinyfish.ai/pricing", checked: '2026-09-23', confidence: verified, note: "TinyFish lists Search at $0.00 per request; a live call left the wallet unchanged."}
     verified: '2026-09-23'
@@ -80,12 +80,12 @@ endpoints:
         language: {type: string, required: false, example: en}
         include_domains: {type: "array[string]", required: false}
         exclude_domains: {type: "array[string]", required: false}
-        after_date: {type: string, required: false}
-        before_date: {type: string, required: false}
+        after_date: {type: string, required: false, note: "YYYY-MM-DD", example: "2024-01-01"}
+        before_date: {type: string, required: false, note: "YYYY-MM-DD", example: "2024-12-31"}
         recency_minutes: {type: integer, required: false, min: 1}
         page: {type: integer, required: false, default: 0, min: 0, max: 10}
         include_thumbnail: {type: boolean, required: false, default: false}
-        fetch: {type: boolean, required: false, default: false}
+        fetch: {type: object, required: false, note: "JSON object in the query string; {} attaches each result's fetched page content. A boolean is rejected (400 INVALID_INPUT).", example: {}}
     test_request: {queryParams: {query: "AI browser agents", domain_type: news}}
     cost: {type: free, value: 0, currency: USD, unit: call, source: docs, source_url: "https://www.tinyfish.ai/pricing", checked: '2026-09-23', confidence: verified, note: "TinyFish lists Search at $0.00 per request; the news index uses the same free endpoint."}
     verified: '2026-09-23'
@@ -111,13 +111,13 @@ endpoints:
         language: {type: string, required: false, example: en}
         include_domains: {type: "array[string]", required: false}
         exclude_domains: {type: "array[string]", required: false}
-        after_date: {type: string, required: false}
-        before_date: {type: string, required: false}
+        after_date: {type: string, required: false, note: "YYYY-MM-DD", example: "2024-01-01"}
+        before_date: {type: string, required: false, note: "YYYY-MM-DD", example: "2024-12-31"}
         pub_year_min: {type: integer, required: false, min: 1900}
         pub_year_max: {type: integer, required: false, min: 1900}
         page: {type: integer, required: false, default: 0, min: 0, max: 10}
         include_thumbnail: {type: boolean, required: false, default: false}
-        fetch: {type: boolean, required: false, default: false}
+        fetch: {type: object, required: false, note: "JSON object in the query string; {} attaches each result's fetched page content. A boolean is rejected (400 INVALID_INPUT).", example: {}}
     test_request: {queryParams: {query: "browser agent benchmark", domain_type: research_paper, pub_year_min: 2024}}
     cost: {type: free, value: 0, currency: USD, unit: call, source: docs, source_url: "https://www.tinyfish.ai/pricing", checked: '2026-09-23', confidence: verified, note: "TinyFish lists Search at $0.00 per request; the research-paper index uses the same free endpoint."}
     verified: '2026-09-23'

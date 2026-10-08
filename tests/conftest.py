@@ -251,6 +251,22 @@ def make_upstream(hook_hits: list | None = None) -> FastAPI:
             return {"data": []}
         return {"data": [{"id": "IG-CONVERSATION-1", "page_id": page_id}]}
 
+    @up.get("/v25.0/{page_id}/posts")
+    async def facebook_page_posts(page_id: str, request: Request):
+        # Meta's new Pages experience answers a user token on a Page edge with code 190 /
+        # subcode 2069032. Only the token of the Page in the path is accepted.
+        expected_token = {
+            "PAGE-DIRECT": "PAGE-TOKEN-DIRECT",
+            "PAGE-CLIENT": "PAGE-TOKEN-CLIENT",
+        }.get(page_id)
+        if request.headers.get("authorization") != f"Bearer {expected_token}":
+            return JSONResponse(
+                {"error": {"message": "A Page access token is required for this call",
+                           "code": 190, "error_subcode": 2069032}},
+                status_code=400,
+            )
+        return {"data": [{"id": f"{page_id}_POST-1", "message": "hello"}]}
+
     @up.post("/v25.0/{page_id}/subscribed_apps")
     async def instagram_subscribe(page_id: str, request: Request):
         expected_token = {

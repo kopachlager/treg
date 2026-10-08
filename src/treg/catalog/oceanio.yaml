@@ -63,6 +63,7 @@ endpoints:
     capability: companies.enrich
     platform: companies
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/enrich/company
     name: "Enrich a company — web traffic, tech stack, headcount"
@@ -95,6 +96,7 @@ endpoints:
     capability: companies.enrich
     platform: companies
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/lookup/companies
     name: "Enrich up to 1,000 companies by domain in one call"
@@ -126,6 +128,7 @@ endpoints:
     capability: companies.enrich
     platform: companies
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/enrich/companies
     name: "Enrich companies in bulk (async, webhook)"
@@ -187,8 +190,8 @@ endpoints:
       body:
         person: {type: object, required: true, note: "the person to match — id, name, firstName, lastName, jobTitle, email, phone, linkedin, twitter, facebook, country. A LinkedIn URL is the strongest key; name + company domain also resolves", example: {name: "Patrick Collison", linkedin: "https://www.linkedin.com/in/patrickcollison"}}
         company: {type: object, required: false, note: "the person's company, to disambiguate a common name. `domain` is enough", example: {domain: "stripe.com"}}
-        revealEmails: {type: object, required: false, note: "{includeEmails: true, webhookUrl: '…'} — asks for verified email addresses too. THIS IS BILLED SEPARATELY at the reveal rate (about 1 credit per verified email) and delivered to the webhook, not inline"}
-        revealPhones: {type: object, required: false, note: "{includePhones: true, webhookUrl: '…'} — asks for direct phone numbers. VERY expensive (about 10 credits per verified phone) and delivered to the webhook"}
+        revealEmails: {type: object, required: false, note: "{includeEmails: true, webhookUrl: '…'} — asks for verified email addresses too. Billed separately at the reveal rate (about 1 credit per verified email) and delivered to the webhook, not inline. Available only with your own key"}
+        revealPhones: {type: object, required: false, note: "{includePhones: true, webhookUrl: '…'} — asks for direct phone numbers. Billed separately (about 10 credits per verified phone) and delivered to the webhook. Available only with your own key"}
       note: "the base call returns the profile — job title, seniorities, departments, full experience history with dates, skills, location, LinkedIn URL, connections and followers — for 0.1 credit. Leave revealEmails/revealPhones out unless you actually need contact details; they are 10x and 100x the price"
     test_request:
       body: {person: {name: "Patrick Collison", linkedin: "https://www.linkedin.com/in/patrickcollison"}, company: {domain: "stripe.com"}}
@@ -202,6 +205,7 @@ endpoints:
       source_url: https://app.ocean.io/docs/getting-started/credits
       checked: '2026-08-20'
       confidence: verified
+      reported_charge: {path: creditsUsed, unit: credit}
       note: 'OBSERVED live 2026-08-20: response creditsUsed 0.1, balance fell by 0.1. Matches the published rate card: "Enrich Person — 0.1 credits / result". Excludes email/phone reveals, which draw from the same pool at 1 and 10 credits per verified value.'
     docs_url: https://app.ocean.io/docs/enrichPerson
     verified: '2026-08-20'
@@ -212,6 +216,7 @@ endpoints:
     capability: people.enrich
     platform: people
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/lookup/people
     name: "Enrich up to 1,000 people by LinkedIn handle in one call"
@@ -243,6 +248,7 @@ endpoints:
     capability: people.enrich
     platform: people
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/enrich/people
     name: "Enrich people in bulk (async, webhook)"
@@ -277,20 +283,22 @@ endpoints:
     scope: any_account
     method: POST
     path: /v3/search/companies
+    # Ocean.io rejects unknown top-level keys with 422; refuse them before the call instead.
+    body_allowlist: true
     name: "Search companies by industry, technology or region"
     summary: "Search companies using filters"
     input:
       body:
-        size: {type: integer, required: false, note: "how many companies to return, max 10,000. THIS IS THE PRICE DIAL — you are billed per company returned. Use `searchAfter` for more than 10,000", example: 2}
+        size: {type: integer, required: false, note: "how many companies to return, max 10,000 with your own key; the shared key requires an explicit size of 1-100. You are billed per company returned. Use `searchAfter` for more than 10,000", example: 2}
         searchAfter: {type: string, required: false, note: "the cursor returned by the previous call; pass it back for the next page"}
-        companiesFilters: {type: object, required: false, note: "the company filter block. `lookalikeDomains` is the headline one — seed it with domains you already like and the result is companies semantically similar to them, each row tagged `relevance` A/B/C. The rest: includeDomains, excludeDomains, companySizes, employeeCountOcean, employeeCountLinkedin, revenues, yearFounded, fundingRound, industries, excludeIndustries, industryCategories, linkedinIndustries, primaryLocations, otherLocations, countriesCount, locationsCount, technologies, keywords, webTraffic, socialMedias, mobileApps, ecommerce, departmentSizes, headcountGrowth, departmentHeadcountGrowth, minRelevance, maxRelevance, updatedWithinMonths, fieldsExist, fieldsNotExist, companyMatchingMode", example: {lookalikeDomains: ["stripe.com"]}}
+        companiesFilters: {type: object, required: false, note: "the company filter block. `lookalikeDomains` is the headline one — seed it with domains you already like and the result is companies semantically similar to them, each row tagged `relevance` A/B/C. The rest: includeDomains, excludeDomains, companySizes, employeeCountOcean, employeeCountLinkedin, revenues, yearFounded, fundingRound, industries, excludeIndustries, industryCategories, linkedinIndustries, primaryLocations, otherLocations, countriesCount, locationsCount, technologies, keywords, webTraffic, socialMedias, mobileApps, ecommerce, departmentSizes, headcountGrowth, departmentHeadcountGrowth, minRelevance, maxRelevance, updatedWithinMonths, fieldsExist, fieldsNotExist, companyMatchingMode. `technologies` is an object, not a list: {apps: {any_of: [...]}} or {categories: {...}}, each taking all_of, any_of or none_of. Industry and technology values must match GET /v2/data-fields exactly; free text returns zero rows", example: {lookalikeDomains: ["stripe.com"]}}
         peopleFilters: {type: object, required: false, note: "narrows to companies that EMPLOY people matching these filters — seniorities, departments, jobTitleKeywords, skills, countries, cities, states and more"}
         fields: {type: "array[string]", required: false, note: "which Company fields to return; omit for the full record", example: ["domain", "name", "webTraffic", "technologies", "headcountGrowth"]}
       note: "the provider's distinctive endpoint. `total` reports the full match count while `size` controls how many you pay for, so run with a small size first to size a segment before buying it. Valid values for the industries/technologies/regions filters come from GET /v2/data-fields"
     test_request:
       body:
         size: 2
-        companiesFilters: {lookalikeDomains: ["stripe.com"]}
+        companiesFilters: {includeDomains: ["stripe.com"]}
         fields: ["domain", "name", "description", "employeeCountOcean", "webTraffic", "technologies", "headcountGrowth", "primaryCountry", "industries"]
     cost:
       type: per_result
@@ -302,9 +310,10 @@ endpoints:
       source_url: https://app.ocean.io/docs/getting-started/credits
       checked: '2026-08-20'
       confidence: verified
+      reported_charge: {path: creditsUsed, unit: credit}
       note: 'OBSERVED live 2026-08-20: size=2 returned creditsUsed 0.4 and the balance fell by 0.4 — 0.2 per company returned, four times the bulk-lookup rate. `size` is the whole price. Matches the published rate card: "Search Companies — 0.2 credits / result".'
     docs_url: https://app.ocean.io/docs/searchCompaniesV3
-    verified: '2026-08-20'
+    verified: '2026-10-06'
     example_response: examples/oceanio.companies.search.json
 
   - id: oceanio.companies.lookalike
@@ -314,13 +323,16 @@ endpoints:
     scope: any_account
     method: POST
     path: /v3/search/companies
+    # Ocean.io rejects unknown top-level keys with 422; refuse them before the call instead.
+    body_allowlist: true
     name: "Find lookalike companies from seed domains"
     summary: "Search companies using filters — seeded with lookalikeDomains, this returns companies similar to your seeds"
     input:
       body:
-        companiesFilters: {type: object, required: true, note: "must carry `lookalikeDomains`: a list of seed domains (your best customers, a competitor's logo wall). Combine with the ordinary filters — primaryLocations, companySizes, industries — to constrain the neighbourhood", example: {lookalikeDomains: ["stripe.com", "adyen.com"], companySizes: ["201-500"]}}
-        size: {type: integer, required: false, note: "how many similar companies to return — the price dial, max 10,000", example: 2}
+        companiesFilters: {type: object, required: true, note: "must carry `lookalikeDomains` INSIDE this object, never at the top level of the body: a list of up to 10 seed domains (your best customers, a competitor's logo wall). Combine with the ordinary filters — primaryLocations, companySizes, industries — to constrain the neighbourhood", example: {lookalikeDomains: ["stripe.com", "adyen.com"], companySizes: ["201-500"]}}
+        size: {type: integer, required: false, note: "how many similar companies to return — the price dial, max 10,000 with your own key; the shared key requires an explicit size of 1-100", example: 2}
         searchAfter: {type: string, required: false, note: "cursor from the previous page"}
+        peopleFilters: {type: object, required: false, note: "narrows to companies that EMPLOY people matching these filters"}
         fields: {type: "array[string]", required: false, note: "which Company fields to return"}
       note: "the same route as oceanio.companies.search, listed separately because lookalike-by-seed-domain is a job of its own and few providers do it. Each row carries `relevance`: A / B / C. `minRelevance` and `maxRelevance` inside companiesFilters let you keep only the close matches"
     test_request:
@@ -338,6 +350,7 @@ endpoints:
       source_url: https://app.ocean.io/docs/getting-started/credits
       checked: '2026-08-20'
       confidence: verified
+      reported_charge: {path: creditsUsed, unit: credit}
       note: 'OBSERVED live 2026-08-20 on the same call as oceanio.companies.search: size=2 with lookalikeDomains=["stripe.com"] returned 15,286 total matches and creditsUsed 0.4. Matches the published rate card: "Search Companies — 0.2 credits / result".'
     docs_url: https://app.ocean.io/docs/searchCompaniesV3
     verified: '2026-08-20'
@@ -350,11 +363,13 @@ endpoints:
     scope: any_account
     method: POST
     path: /v3/search/people
+    # Ocean.io rejects unknown top-level keys with 422; refuse them before the call instead.
+    body_allowlist: true
     name: "Search people by job title, skills or company filters"
     summary: "Search people using filters and/or people Ids"
     input:
       body:
-        size: {type: integer, required: false, note: "how many people to return, max 10,000. THIS IS THE PRICE DIAL — billed per person returned", example: 2}
+        size: {type: integer, required: false, note: "how many people to return, max 10,000 with your own key; the shared key requires an explicit size of 1-100. Billed per person returned", example: 2}
         peopleFilters: {type: object, required: false, note: "seniorities, departments, excludeDepartments, jobTitleKeywords, skills, names, countries, excludeCountries, regions, states, cities, currentJobDescription, allJobDescriptions, profileDescription, connections, followers, changedPositionAfter/Before (the job-change signal), includeLinkedinHandles, excludeLinkedinHandles, includePeopleIds, excludePeopleIds, lookalikeLinkedinHandles, updatedWithinMonths, fieldsExist, fieldsNotExist", example: {seniorities: ["C-Level"]}}
         companiesFilters: {type: object, required: false, note: "restricts the search to people at companies matching this block — the same filters as the company search, including lookalikeDomains", example: {includeDomains: ["stripe.com"]}}
         peoplePerCompany: {type: integer, required: false, note: "cap on people returned per company, so one big employer does not eat the whole page. Omit to take everyone"}
@@ -377,6 +392,7 @@ endpoints:
       source_url: https://app.ocean.io/docs/getting-started/credits
       checked: '2026-08-20'
       confidence: verified
+      reported_charge: {path: creditsUsed, unit: credit}
       note: 'OBSERVED live 2026-08-20: size=2 returned creditsUsed 0.4 and the balance fell 29.4 -> 29.0 — 0.2 per person returned. Matches the published rate card: "Search People — 0.2 credits / result".'
     docs_url: https://app.ocean.io/docs/searchPeopleV3
     verified: '2026-08-20'
@@ -388,6 +404,7 @@ endpoints:
     capability: people.email.find
     platform: people
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/reveal/emails
     name: "Reveal verified work emails for person ids (async)"
@@ -419,6 +436,7 @@ endpoints:
     capability: people.phone.find
     platform: people
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/reveal/phones
     name: "Reveal direct phone numbers for person ids (async)"
@@ -577,6 +595,7 @@ endpoints:
     capability: companies.search.autocomplete
     platform: companies
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/autocomplete/companies
     name: "Autocomplete a company name to its domain"
@@ -610,6 +629,7 @@ endpoints:
     capability: companies.search.autocomplete
     platform: companies
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/autocomplete/keywords
     name: "Autocomplete a search keyword"
@@ -641,6 +661,7 @@ endpoints:
     capability: people.search.autocomplete
     platform: people
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/autocomplete/job-titles
     name: "Autocomplete a job title"
@@ -672,6 +693,7 @@ endpoints:
     capability: people.search.autocomplete
     platform: people
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/autocomplete/locations
     name: "Autocomplete a location"
@@ -704,6 +726,7 @@ endpoints:
     capability: people.search.autocomplete
     platform: people
     scope: any_account
+    platform_blocked: Shared-key launch is limited to the four synchronous search and person-enrichment tools; connect your own Ocean.io key for this route.
     method: POST
     path: /v2/autocomplete/skills
     name: "Autocomplete a skill"

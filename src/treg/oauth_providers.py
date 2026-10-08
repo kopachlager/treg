@@ -105,6 +105,9 @@ class OAuthProvider:
     # perfectly well-scoped token.
     token_scopes_header: str = ""
     base_url: str = ""  # upstream API root, so a successful connect can auto-provision the tool
+    # Earlier base_urls. A team tool registered on one still wins a catalog call (tier 1) and
+    # relays to its own base_url; only treg's routing moved.
+    legacy_base_urls: tuple[str, ...] = ()
     # A provider's catalog can span additional API roots. These roots are executable policy, not
     # catalog data: a YAML `host` only selects an exact entry from this allow-list, so a catalog
     # edit cannot redirect an injected team or platform credential to an arbitrary host.
@@ -415,6 +418,13 @@ class OAuthProvider:
             if value := getattr(target, field):
                 overrides[field] = value
         return replace(self, **overrides)
+
+    def tool_lookup_urls(self, url: str) -> list[str]:
+        """`url`, then the same path on each legacy base: where a team's own tool may be registered."""
+        base = self.base_url.rstrip("/")
+        if not url.startswith(base + "/"):
+            return [url]
+        return [url] + [old.rstrip("/") + url[len(base):] for old in self.legacy_base_urls]
 
     def authorization_method_name(self, stored: str) -> str:
         return connection_authorization.method_name(self, stored)
@@ -979,9 +989,15 @@ FACEBOOK = OAuthProvider(
     discover_label_field="name",
     discover_extra_path="/me/businesses?fields=owned_pages{id,name},client_pages{id,name}",
     discover_extra_list_paths=_META_BIZ_PAGE_LISTS,
-    # /me returns the person, not the Page, and needs no extra scope — so it keeps working even for
-    # a connection whose Page was later unassigned, which is exactly when you want the probe to
-    # still distinguish "credential dead" from "asset gone".
+    # Every Page edge rejects the user token (code 190 / subcode 2069032). Picking the Page derives
+    # its Page token from the same listings, and calls inject that; the user token stays for the
+    # picker. One connection therefore acts on one Page.
+    call_token_field="page_access_token",
+    resource_token_path="/me/accounts?fields=id,access_token",
+    resource_token_extra_path="/me/businesses?fields=owned_pages{id,access_token},client_pages{id,access_token}",
+    resource_token_extra_list_paths=_META_BIZ_PAGE_LISTS,
+    # /me needs no extra scope. It returns the person before a Page is selected and the Page after,
+    # so it answers for whichever token the tool injects.
     probe_path="/me?fields=id,name",
 )
 
@@ -1999,7 +2015,10 @@ TIKHUB = OAuthProvider(
     client_id_setting="", client_secret_setting="",
     category="Social media",
     summary="Read TikTok, Instagram, YouTube, X and more social platforms through one unified API.",
-    base_url="https://api.tikhub.io",
+    # The enterprise node serves the same API and keys; only there does an account's higher RPS
+    # level take effect (api.tikhub.io caps every key lower).
+    base_url="https://api-node-enterprise.tikhub.io",
+    legacy_base_urls=("https://api.tikhub.io",),
     docs_url="https://docs.tikhub.io/",
     probe_path="/api/v1/tikhub/user/get_user_info",  # account info — the natural key check
 )
@@ -2835,6 +2854,37 @@ FIRECRAWL = OAuthProvider(
     probe_path="/v2/team/credit-usage",
 )
 
+CRAWL4AI = OAuthProvider(
+    service="crawl4ai",
+    display_name="Crawl4AI",
+    auth_kind="key",
+    token_label="API key",
+    token_placeholder="sk_live_…",
+    # Bearer, not the also-accepted `x-api-key`, matching every Crawl4AI doc example. A bogus or
+    # missing key answers 401 {"error": "sign in"} on the probe (live 2026-10-05).
+    token_header="Authorization",
+    token_format="Bearer {secret}",
+    setup_url="https://api.crawl4ai.com/dashboard/",
+    setup_action_label="Get your Crawl4AI API key",
+    setup_steps=(
+        "Open the Crawl4AI dashboard and click Get a key (a 7-day pass key is issued at once).",
+        "Verify your email for a permanent key and the signup credit, then copy it.",
+    ),
+    setup_note=(
+        "Scrape, search, extract, answer, batch, jobs and recipes spend Crawl4AI credits "
+        "(1 credit = $0.001; a page already in its archive costs half). "
+        "Connecting checks the free balance endpoint."
+    ),
+    auth_uri="", token_uri="",
+    scopes={},
+    client_id_setting="", client_secret_setting="",
+    category="SEO",
+    summary="Scrape any page to clean Markdown, search the web, and extract typed JSON from pages.",
+    base_url="https://api.crawl4ai.com",
+    docs_url="https://api.crawl4ai.com/docs",
+    probe_path="/v1/billing/balance",  # free: reads the credit balance, spends nothing
+)
+
 SPIDERCLOUD = OAuthProvider(
     service="spidercloud",
     display_name="Spider",
@@ -3158,6 +3208,49 @@ TRESTLEIQ = OAuthProvider(
     # fixture returned 200. Trestle bills the probe as one Phone Validation query.
     probe_path="/3.0/phone_intel?phone=%2B13005550100&is_sandbox=true",
     probe_cost_micro=15_000,
+)
+
+HLRLOOKUP = OAuthProvider(
+    service="hlrlookup",
+    display_name="HLR Lookup",
+    auth_kind="key",
+    token_label="API key",
+    token_placeholder="your HLR Lookup API key",
+    token_location="json",
+    token_param="api_key",
+    token_format="{secret}",
+    extra_credential_label="API secret",
+    extra_credential_location="json",
+    extra_credential_param="api_secret",
+    platform_extra_setting="platform_key_hlrlookup_secret",
+    extra_credential_note=(
+        "HLR Lookup authenticates every request with an API key and an API secret in the JSON "
+        "body. Add the secret after the key; treg injects both values server-side."
+    ),
+    setup_url="https://www.hlrlookup.com/",
+    setup_action_label="Get your HLR Lookup API key and secret",
+    setup_steps=(
+        "Sign in to HLR Lookup and open the API settings in your account.",
+        "Copy BOTH the API key and the API secret. Paste the key here, then add the secret.",
+    ),
+    setup_note=(
+        "A live lookup of a mobile number spends one credit, two for a US mobile with usa_status. "
+        "Landlines, numbers without coverage, bad formats and errors are free. The balance check "
+        "treg uses to verify the pair is free."
+    ),
+    auth_uri="", token_uri="", scopes={}, client_id_setting="", client_secret_setting="",
+    category="Enrichment",
+    summary="Check whether a mobile number is live on its network right now, and which network serves it.",
+    base_url="https://api.hlrlookup.com",
+    docs_url="https://www.hlrlookup.com/knowledge",
+    # Free. POST /apiv2/balance answers 200 {"Status":"OK","Credits":…} for a valid pair and 401
+    # {"error":"UNAUTHORIZED"} when either half is wrong. The key alone always answers 400
+    # BAD_REQUEST, valid or not, so the first connect step stores the key unchecked until the secret
+    # is added; it is never labelled verified from that partial probe.
+    probe_path="/apiv2/balance",
+    probe_method="POST",
+    probe_json={},
+    probe_deferred_statuses=(400,),
 )
 
 
@@ -3873,11 +3966,11 @@ REGISTRY: dict[str, OAuthProvider] = {
         TIKHUB, BRIGHTDATA, SEMRUSH, JUSTONEAPI,
         SCRAPECREATORS,
         # SEO API-key providers
-        DATAFORSEO, SERANKING, MOZ, MAJESTIC, SERPSTAT, EXA, SEARCH1API, TAVILY, OCTEN, LINKUP, YOU, VALYU, KEENABLE, OLOSTEP, FIRECRAWL, SPIDERCLOUD, PERPLEXITY,
+        DATAFORSEO, SERANKING, MOZ, MAJESTIC, SERPSTAT, EXA, SEARCH1API, TAVILY, OCTEN, LINKUP, YOU, VALYU, KEENABLE, OLOSTEP, FIRECRAWL, CRAWL4AI, SPIDERCLOUD, PERPLEXITY,
         SCRAPEGRAPHAI, SERPER, LITESCRAPE, CLORO, PRERENDERBUDDY,
         # more Enrichment API-key providers
         LUSHA, CORESIGNAL, DIFFBOT, THECOMPANIESAPI, LEADMAGIC, ENRICHLAYER, FIBER_AI, CRUSTDATA, AVIATO,
-        COMPANYENRICH, OCEANIO, ADYNTEL, TOMBA, TRESTLEIQ, PREDICTLEADS, FINDYMAIL, BRANDDEV, ICYPEAS, LEADSFORGE,
+        COMPANYENRICH, OCEANIO, ADYNTEL, TOMBA, TRESTLEIQ, HLRLOOKUP, PREDICTLEADS, FINDYMAIL, BRANDDEV, ICYPEAS, LEADSFORGE,
         INFLUENCERSCLUB,
         # Market data API-key providers
         COINGECKO, POLYGON, FINNHUB, TWELVEDATA, FMP, EODHD, MARKETSTACK, TIINGO,
@@ -3898,6 +3991,16 @@ CATEGORY_ORDER = ("AI generation", "SEO", "Advertising", "Social media", "Enrich
 
 def get(service: str) -> OAuthProvider | None:
     return REGISTRY.get(service)
+
+
+def legacy_aliases(url: str) -> list[str]:
+    """The same call on each legacy base of the provider that serves `url` (empty for most). A
+    deny rule a team wrote against the old host still covers calls on the new one."""
+    for provider in REGISTRY.values():
+        if provider.legacy_base_urls:
+            if len(urls := provider.tool_lookup_urls(url)) > 1:
+                return urls[1:]
+    return []
 
 
 def credentials(provider: OAuthProvider) -> tuple[str, str]:

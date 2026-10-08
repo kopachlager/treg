@@ -45,6 +45,7 @@ from ...models import (
     Tool,
     ToolRequest,
     User,
+    WebArenaRun,
 )
 from ..identity import session as sess
 from ..identity import api_keys as managed_keys
@@ -243,7 +244,7 @@ async def list_user_orgs(
 # Order matters: LedgerEntry references a CreditBlock, so it goes first; `IdempotentCall.membership_id`
 # points at Membership, so Membership stays last and IdempotentCall sits above it.
 ORG_SCOPED_MODELS = (
-    ArenaEvaluation, ArenaRun,
+    ArenaEvaluation, ArenaRun, WebArenaRun,
     Tool, Secret, Bundle, PendingOAuth, CallRecord, RunRecord, Invite, DenyRule, Project,
     ApiKeyEvent, ApiKey,
     CapabilityPin,

@@ -79,6 +79,7 @@ type View = keyof typeof pages
 export const LegacyPlatformPage = lazy(() => import('./pages/LegacyPlatformPage.vue'))
 
 export const dialogs = {
+  OnboardingFlow: lazy(() => import('./onboarding/OnboardingFlow.vue')),
   FishVoiceDialog: lazy(() => import('./dialogs/FishVoiceDialog.vue')),
   ConnectTokenDialog: lazy(() => import('./dialogs/ConnectTokenDialog.vue')),
   TopUpDialog: lazy(() => import('./dialogs/TopUpDialog.vue')),

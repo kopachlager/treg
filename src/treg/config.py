@@ -53,6 +53,11 @@ def _blocked_email_domains(raw: str) -> frozenset[str]:
     )
 
 
+# How treg introduces itself to a provider: on every call on its shared key (the relay's rewrite 5)
+# and as the default of the clients it calls providers with, never a library's own default.
+TREG_USER_AGENT = "treg/1.0 (+https://treg.to)"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="TREG_", extra="ignore")
 
@@ -259,6 +264,8 @@ class Settings(BaseSettings):
     platform_key_tomba: str = ""          # the API key (ta_…); X-Tomba-Key header
     platform_key_tomba_secret: str = ""   # the API secret (ts_…); X-Tomba-Secret — BOTH must be set
     platform_key_trestleiq: str = ""       # raw key; exact lowercase x-api-key header
+    platform_key_hlrlookup: str = ""         # JSON body api_key; prepaid lookup credits, 1 per mobile lookup
+    platform_key_hlrlookup_secret: str = ""  # JSON body api_secret paired with it — BOTH must be set
     # (tomba's data routes need the header pair; TOMBA.platform_extra_setting names this second slot)
     platform_key_influencersclub: str = ""  # Bearer key (dashboard JWT); creator discovery + enrichment, fx.yaml $0.598/credit (our $299/500 plan)
     platform_key_crustdata: str = ""  # Bearer key; every call also needs the pinned x-api-version header
@@ -275,6 +282,7 @@ class Settings(BaseSettings):
     platform_key_litescrape: str = ""  # Bearer; prepaid calls, free key status endpoint
     platform_key_keenable: str = ""   # X-API-Key; $4/1,000-request package, 10 requests/s per organization
     platform_key_olostep: str = ""    # Bearer; prepaid credits, platform price $0.002/credit
+    platform_key_crawl4ai: str = ""
     platform_key_firecrawl: str = ""  # Bearer; Standard plan credits, priced at the public base-plan rate
     platform_key_scrapegraphai: str = ""  # SGAI-APIKEY; credit balance and bounded v2 web tools
     platform_key_spidercloud: str = ""   # Bearer; PAYG USD balance, only priced routes may use shared key
@@ -358,6 +366,30 @@ class Settings(BaseSettings):
     # the wait, so the timeout is looser than an agent's search. Rate limits bound anonymous use.
     find_candidates: int = 60
     find_timeout_s: float = 6.0
+    # The first-run onboarding (application/onboarding/, docs/context/interface/onboarding.md). Off
+    # = the dashboard keeps the team-name welcome dialog. On, a new user's setup looks them up
+    # (GitHub, their company, their homepage), asks the LLM for task inputs grounded in what it
+    # found and the judge (Jev, a catalog endpoint) to rank and check them. Every key below is
+    # optional: a missing one skips its step and the task falls back to its labelled example.
+    onboarding_v2: bool = False
+    # Off for everyone else, on for these: comma-separated addresses or `@domain`s.
+    onboarding_v2_emails: str = ""
+    # The experiment: a new user whose address is not free, ISP, alias or school mail is offered to the
+    # dashboard's PostHog flag `onboarding-v2`, whose `test` arm gets this flow and `control` the
+    # team-name modal. Off = nobody outside the two settings above sees the flow.
+    onboarding_v2_experiment: bool = False
+    # A member token of treg's own house team: the lookup's catalog calls (company record, homepage,
+    # input checks) are ordinary metered calls on that team, never on the new user's credit.
+    onboarding_treg_token: str = ""
+    # The registry that token belongs to; empty = this one (`public_url`).
+    onboarding_treg_url: str = ""
+    # Any GitHub token; only the public commit-search and user APIs are read with it.
+    onboarding_github_token: str = ""
+    # Through the Vercel AI Gateway's OpenAI-compatible API, keyed by `ai_gateway_api_key`.
+    onboarding_llm_model: str = "anthropic/claude-haiku-4-5-20251001"
+    # What one signup's lookup may spend on the house team, in micro-USD; past it the remaining
+    # checks are skipped.
+    onboarding_max_house_micro: int = 50_000
     # Which find answers: `v1` (endpoint recall, above), `v2` (recall by job: a unit per capability,
     # every vendor listed once the job fits; docs/context/architecture/find.md), or `shadow` (v1 is
     # served, v2 runs beside it and is only logged). One setting is the rollout and the rollback.
@@ -441,7 +473,11 @@ class Settings(BaseSettings):
     # agent bills a card all night". Cap is per calendar month, cooldown is between attempts, and
     # max_attempts counts CONSECUTIVE failures before auto-top-up disables itself.
     autotopup_monthly_cap_usd: int = 100
+    # The wait after a FAILED charge. After a successful one the wait is one hour divided by the
+    # team's `autotopup_max_per_hour` (default below): one charge an hour left teams that spend more
+    # than their refill per hour empty for the rest of the hour, with auto top-up ON.
     autotopup_cooldown_s: int = 3600
+    autotopup_default_per_hour: int = 5
     autotopup_max_attempts: int = 3
 
     # Call-time SSRF guard on the proxy: resolve the upstream host and refuse an internal target. On by
@@ -506,6 +542,11 @@ class Settings(BaseSettings):
     # default so every merge along the way changes nothing users see; production flips it once
     # the whole hub has landed on main.
     hub_enabled: bool = False
+    # Web Arena is shown only after reviewed tests exist for all live tasks.
+    web_arena_enabled: bool = False
+    web_arena_jev_user_daily_cap: int = 20
+    web_arena_jev_ops_daily_cap: int = 1000
+    web_arena_fact_model: str = "openai/gpt-4o-mini"
     # With the hub on, a comma-separated list of team slugs that may use it; EMPTY means every
     # team. The middle stage between "off" and "open": the owner's own team tries the live hub on
     # production first (decided 2026-09-24). Pages that have no caller (the share page, the

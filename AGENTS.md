@@ -40,10 +40,15 @@ Everything else in this file is guidance; these are the contract, and they win o
    Keep `reserve` and `settle` separate; read archive pointers, close the session, then fetch bytes.
 4. Plain `/call/` is a faithful relay: the injected credential, the transport headers listed in
    `src/treg/infra/upstream/relay.py`, and (on treg's shared key only) the per-org and, for pinned
-   agents, per-pin re-scoping of the caller's `Idempotency-Key` are the only rewrites. A credential
+   agents, per-pin re-scoping of the caller's `Idempotency-Key` and treg's own `User-Agent` in place
+   of the caller's are the only rewrites. A credential
    binding with `location: "json"` explicitly parses and reserializes the top-level JSON object; it
    is not byte-faithful and must never be used with an upstream that signs or hashes the raw body.
    Never add upstream-specific modeling.
+   One more rewrite, on 4xx/5xx only: every spelling of an injected credential the provider echoes
+   back in an error body is masked (`***`) before the caller, an idempotent replay or the evidence
+   row sees it. The error body is read whole (gzip/deflate decoded) up to 8 MiB; on a credentialed
+   call one that cannot be scanned is replaced whole, never relayed as a prefix.
    A live-verified free catalog endpoint may declare an anonymous fallback; its empty binding list
    omits credential injection but does not strip or rewrite caller headers.
    Routed endpoints and overflow wrap the child's answer and say so; they never alter it. Responses needing settlement or ownership evidence are buffered by the application

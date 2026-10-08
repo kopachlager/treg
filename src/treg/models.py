@@ -79,6 +79,9 @@ class Org(SQLModel, table=True):
     autotopup_threshold_micro: int = Field(default=0)   # 0 = "use the configured default"
     autotopup_amount_micro: int = Field(default=0)      # 0 = "use the configured default"
     autotopup_monthly_cap_micro: int = Field(default=0)  # 0 = "use the configured default"
+    # How many automatic charges may run in one hour after a SUCCESSFUL one (0 = the configured
+    # default). Part of the mandate the team agreed to, so it is stored next to the amounts.
+    autotopup_max_per_hour: int = Field(default=0)
     # WHEN the org agreed to the threshold/amount it is being charged on. The MIT mandate: a compliance
     # record, which is why it is a timestamp and not a boolean — "they ticked a box at some point" is
     # not defensible in a dispute, "they agreed on 2026-07-30T11:02Z" is.
@@ -446,6 +449,16 @@ class CallRecord(SQLModel, table=True):
     # this row by id and both targets carry their own index. Last columns (alembic appends).
     archive_key_hash: str | None = Field(default=None)
     archive_content_hash: str | None = Field(default=None)
+    # The provider's share of `duration_ms` (set by the call path; see `upstream_ms` there): the
+    # request until its answer is read. NULL when no request reached the provider, and on rows
+    # written before the column existed.
+    upstream_ms: int | None = Field(default=None)
+    # The contract's verdict word for this answer (`catalog/contracts.yaml` `verdict`): `valid`,
+    # `catch_all`, `unknown`... for a verify, `verified`/`unverified` for a find. Set where `hit`
+    # is, by the same adapter, and like `hit` copied from the task row for an async submission.
+    # NULL = the contract records no verdict, the answer carried none, or the provider used a
+    # word its adapter does not map. Never content: one word from a closed list.
+    verdict: str | None = Field(default=None)
 
 
 class RunRecord(SQLModel, table=True):
@@ -864,6 +877,8 @@ class AsyncTaskRecord(SQLModel, table=True):
 
     # Attribution snapshot: never infer ownership from a current membership or lossy audit.
     tags: dict | None = Field(default=None, sa_column=Column("tags", JSON, nullable=True))
+    # The terminal answer's verdict word, kept with `hit` for the same insert race.
+    verdict: str | None = Field(default=None)
 
 
 class AsyncResourceRecord(SQLModel, table=True):
@@ -1105,7 +1120,7 @@ class OAuthClient(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("client_id", name="uq_oauth_client_id"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    client_id: str = Field(index=True)
+    client_id: str
     kind: str = Field(default="dcr")            # "dcr" | "cimd"
     client_name: str = Field(default="")
     client_uri: str = Field(default="")
@@ -1143,7 +1158,7 @@ class OAuthCode(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("code", name="uq_oauth_code"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    code: str = Field(index=True)
+    code: str
     client_id: str = Field(index=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     org_id: int = Field(foreign_key="org.id", index=True)
@@ -1193,7 +1208,7 @@ class OAuthRefresh(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("token_hash", name="uq_oauth_refresh_token"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    token_hash: str = Field(index=True)
+    token_hash: str
     family_id: str = Field(index=True)      # every descendant of one grant shares this
     client_id: str = Field(index=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -1706,7 +1721,7 @@ class ArchiveKey(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("key_hash", name="uq_archive_key_hash"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    key_hash: str = Field(index=True)              # sha256 from archive.cache_key
+    key_hash: str                                 # sha256 from archive.cache_key
     endpoint_id: str = Field(index=True)           # catalog endpoint id — policy + report joins
     provider: str = Field(default="", index=True)  # denormalized for per-provider budgets/reports
     policy: str = Field(default="forbidden")       # effective policy when last written (see archive)
@@ -1835,12 +1850,93 @@ class ArenaRun(SQLModel, table=True):
     revealed_at: NaiveUTC | None = None
 
 
+class WebArenaRun(SQLModel, table=True):
+    """Private Web Arena quote, attempts, and result checks in one encrypted payload."""
+    id: str = Field(primary_key=True)
+    org_id: int = Field(foreign_key="org.id", index=True)
+    user_id: int = Field(index=True)
+    task: str
+    mode: str
+    state: str
+    payload: str
+    created_at: NaiveUTC = Field(default_factory=_now, index=True)
+    deadline_at: NaiveUTC
+    expires_at: NaiveUTC = Field(index=True)
+    cancel_requested: bool = False
+
+
+class WebArenaPublication(SQLModel, table=True):
+    """Content-free live totals, read without running providers."""
+    id: str = Field(primary_key=True)
+    kind: str = Field(index=True)
+    version: str
+    payload: dict = Field(sa_type=JSON)
+    created_at: NaiveUTC = Field(default_factory=_now)
+
+
+class WebArenaJudgeBudget(SQLModel, table=True):
+    """Daily Jev admission counter; one global row and one row per user."""
+    id: str = Field(primary_key=True)
+    calls: int = 0
+
+
+class WebArenaCallDayStat(SQLModel, table=True):
+    """Content-free, uncached provider-call observations for one endpoint and UTC day."""
+    __table_args__ = (UniqueConstraint("endpoint_id", "day", name="uq_webarenacalldaystat_endpoint_day"),)
+    id: int | None = Field(default=None, primary_key=True)
+    endpoint_id: str = Field(index=True)
+    day: str = Field(index=True)
+    calls: int = 0
+    decided: int = 0
+    hits: int = 0
+    timed: int = 0
+    duration_sum_ms: int = 0
+    duration_sample: list[int] = Field(default_factory=list, sa_type=JSON)
+
+
+class WebArenaCallCursor(SQLModel, table=True):
+    """Last audited call folded into Web Arena's traffic observations."""
+    id: str = Field(primary_key=True)
+    call_id: int = 0
+    updated_at: NaiveUTC = Field(default_factory=_now)
+    observed_since: NaiveUTC | None = None  # start of the one-time shortened observation seed
+
+
+class WebArenaSeedProgress(SQLModel, table=True):
+    """Saved position in the initial Web observation seed."""
+    id: str = Field(primary_key=True)
+    observed_since: NaiveUTC
+    lagged_until: NaiveUTC
+    first_id: int
+    highwater_id: int
+    endpoints: list[str] = Field(sa_type=JSON)
+    last_id: int
+    endpoint_index: int = 0
+    scanned: int = 0
+    eligible_calls: int = 0
+    updated_at: NaiveUTC = Field(default_factory=_now)
+
+
+class WebArenaSeedDayStat(SQLModel, table=True):
+    """Content-free daily buckets kept separate until the seed is complete."""
+    __table_args__ = (UniqueConstraint("endpoint_id", "day", name="uq_webarenaseeddaystat_endpoint_day"),)
+    id: int | None = Field(default=None, primary_key=True)
+    endpoint_id: str = Field(index=True)
+    day: str = Field(index=True)
+    calls: int = 0
+    decided: int = 0
+    hits: int = 0
+    timed: int = 0
+    duration_sum_ms: int = 0
+    duration_sample: list[int] = Field(default_factory=list, sa_type=JSON)
+
+
 class ArenaEvaluation(SQLModel, table=True):
     """One immutable preference for a run's creator, including its exposure context."""
     __table_args__ = (UniqueConstraint("run_id", name="uq_arena_evaluation"),)
     id: str = Field(primary_key=True)
     org_id: int = Field(foreign_key="org.id", index=True)
-    run_id: str = Field(foreign_key="arenarun.id", index=True)
+    run_id: str = Field(foreign_key="arenarun.id")
     user_id: int
     kind: str
     payload: str  # encrypted selection, exposure snapshot, reasons and optional comment
@@ -1924,6 +2020,9 @@ class EndpointDayStat(SQLModel, table=True):
     latency_seen: int = Field(default=0)   # successful rows with a duration, for the reservoir
     latency_sample: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     updated_at: NaiveUTC = Field(default_factory=_now)
+    # Calls per contract verdict word (`CallRecord.verdict`), `{"valid": 31, "catch_all": 4}`.
+    # NULL on a bucket folded before the column existed; read as empty.
+    verdicts: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
 
 class EndpointStatCursor(SQLModel, table=True):
@@ -1938,3 +2037,17 @@ class EndpointStatCursor(SQLModel, table=True):
     watermark: NaiveUTC | None = Field(default=None)  # created_at of the last consumed row
     caught_up_at: NaiveUTC | None = Field(default=None)
     updated_at: NaiveUTC = Field(default_factory=_now)
+
+
+class OnboardingProfile(SQLModel, table=True):
+    """One new user's first-run lookup: what was found about them, the ranked first tasks and their
+    filled-in inputs. One row per user, ever; `application.onboarding` is its only writer. The
+    payload is encrypted: it holds the email's GitHub profile, company and homepage evidence."""
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True, unique=True)   # provenance; no FK, like ArenaRun
+    org_id: int | None = Field(default=None, index=True)
+    status: str = "pending"        # pending (hints only) | running | done | failed
+    payload: str = ""
+    house_cost_micro: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, server_default="0"))
+    created_at: NaiveUTC = Field(default_factory=_now)
+    finished_at: NaiveUTC | None = None

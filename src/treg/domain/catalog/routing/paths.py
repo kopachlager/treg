@@ -156,8 +156,37 @@ def email_domain(v: Any) -> str | None:
     return None if d in _FREE_MAIL else d
 
 
-_FREE_MAIL = {"gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "live.com",
-              "aol.com", "proton.me", "protonmail.com", "me.com", "msn.com", "qq.com", "163.com", "126.com"}
+# Mailboxes anyone can open (global and regional free mail, ISP mail, common disposable and alias services):
+# their domain says nothing about the person's company.
+_FREE_MAIL = frozenset({
+    # global free mail
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com",
+    "ymail.com", "rocketmail.com", "aol.com", "aim.com", "icloud.com", "me.com", "mac.com",
+    "proton.me", "protonmail.com", "protonmail.ch", "pm.me", "tutanota.com", "tuta.io", "zoho.com",
+    "zohomail.com", "gmx.com", "gmx.net", "mail.com", "email.com", "hey.com", "fastmail.com",
+    "yandex.com", "yandex.ru", "ya.ru", "mail.ru", "inbox.ru", "list.ru", "bk.ru", "rambler.ru",
+    # regional free mail
+    "qq.com", "foxmail.com", "163.com", "126.com", "yeah.net", "sina.com", "sina.cn", "sohu.com",
+    "aliyun.com", "139.com", "naver.com", "daum.net", "hanmail.net", "nate.com", "yahoo.co.jp",
+    "yahoo.co.uk", "yahoo.fr", "yahoo.de", "yahoo.es", "yahoo.it", "yahoo.com.br", "yahoo.co.in",
+    "hotmail.co.uk", "hotmail.fr", "hotmail.de", "hotmail.it", "hotmail.es", "outlook.de", "outlook.fr",
+    "outlook.es", "outlook.jp", "live.co.uk", "live.fr", "web.de", "gmx.de", "gmx.at", "gmx.ch",
+    "t-online.de", "freenet.de", "orange.fr", "wanadoo.fr", "free.fr", "laposte.net", "sfr.fr",
+    "libero.it", "virgilio.it", "tiscali.it", "seznam.cz", "wp.pl", "onet.pl", "o2.pl", "interia.pl",
+    "uol.com.br", "bol.com.br", "terra.com.br", "rediffmail.com",
+    # ISP mail
+    "comcast.net", "verizon.net", "att.net", "sbcglobal.net", "bellsouth.net", "cox.net", "charter.net",
+    "earthlink.net", "optonline.net", "btinternet.com", "sky.com", "virginmedia.com", "talktalk.net",
+    "shaw.ca", "rogers.com", "sympatico.ca", "bigpond.com", "optusnet.com.au", "xtra.co.nz",
+    # disposable
+    "mailinator.com", "guerrillamail.com", "10minutemail.com", "temp-mail.org", "tempmail.com",
+    "yopmail.com", "trashmail.com", "sharklasers.com", "getnada.com", "dispostable.com",
+    "maildrop.cc", "throwawaymail.com", "mohmal.com", "emailondeck.com", "fakeinbox.com",
+    # forwarding aliases: a real company's site, but anyone can get an address there
+    "duck.com", "privaterelay.appleid.com", "mozmail.com", "relay.firefox.com", "simplelogin.com",
+    "simplelogin.co", "simplelogin.fr", "slmail.me", "aleeas.com", "8alias.com", "addy.io", "anonaddy.com",
+    "anonaddy.me", "passmail.net", "passmail.com", "passinbox.com", "33mail.com",
+})
 
 
 def host(v: Any) -> str | None:

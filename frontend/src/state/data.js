@@ -44,7 +44,7 @@ export default function data(){
   // usage-metering: rollups + the member's own used/cap
       // Billing (Stripe top-ups). `billing` null = not loaded / not an admin; billing.configured
       // false = this deployment sells no balance, so the whole block stays hidden.
-      billing:null, billingBusy:false, topupAmount:10, autoAmount:10, autoThreshold:5, autoConsent:false, autoOpen:false,
+      billing:null, billingBusy:false, topupAmount:10, autoAmount:10, autoThreshold:5, autoPerHour:5, autoConsent:false, autoOpen:false,
       topupOpen:false, topupPick:10, topupOther:null, topupAuto:true, topupErr:'',
       capCfg:null, capUsd:0, capBusy:false, capErr:'',
       renameName:'', renameSlug:'', renameBusy:false, renameErr:'',
@@ -117,6 +117,7 @@ export default function data(){
       share:{on:false, email:'', role:'viewer', full:true, busy:false, err:'', sent:null, member:null},  // detail-page "Share…" (invite + land on this page)
       me:'', icHash:'', myOrgs:[], isAdmin:false,
       onboarded:true,  // first-run onboarding done (server flag; gates the welcome modal)
+      onboardingV2:false, onboardingV2Exp:false, onboardingV2On:false, onboardingPreviewOn:false,  // the server's first-run flow (/onboarding) replaces the welcome modal
       welcome:{on:false, step:0, name:'', agent:'claude-code', moreOpen:false, busy:false, err:''},  // first-run: name your team → pick your agent → setup line
       emptyTab:'agent',
       tools:[], health:{}, calls:[], runs:[], callsLoaded:false, activityNext:null, activityOlderBusy:false, adminStats:null, adminOrgs:[], adminUsers:[],

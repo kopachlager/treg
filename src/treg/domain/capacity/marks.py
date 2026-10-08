@@ -15,6 +15,10 @@ no 2xx in between, locks. Close eagerly: while locked, `probe_due` admits one re
 per `PROBE_EVERY_S`; that call's 2xx clears the lock (conditionally on the lock id it was admitted
 under, so a late probe cannot erase a newer lock). Nothing else clears it except `until`: a guessed
 hold lasts `DEFAULT_LOCK`, a vendor-stated reset at most `MAX_LOCK`.
+
+The sweep's own exhausted reading (`capacity:state:<provider>`) gets the same probe: without one, a
+top-up stays refused until the next sweep. A probe's 2xx lifts that reading (`clear_sweep_state`),
+conditionally on the reading it was admitted under, so a newer sweep's word stands.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ from datetime import datetime, timedelta
 from ... import ratestore
 from ...infra.db import session_maker
 from ...timeutil import utcnow_naive
+from .policy import LatestState
+from .sweep import STATE_NS, STATE_TTL_S
 
 LOCK_NS = "capacity:lock"
 LOCK_TTL_S = 24 * 3600
@@ -36,6 +42,7 @@ STRIKE_MIN_GAP = timedelta(seconds=15)
 DEFAULT_LOCK = timedelta(hours=1)
 MAX_LOCK = timedelta(hours=6)
 PROBE_EVERY_S = 60.0
+SWEEP_PROBE = "sweep:"
 
 log = logging.getLogger("treg.capacity")
 
@@ -130,4 +137,39 @@ def probe_due(key: str) -> bool:
     if now - _last_probe.get(key, float("-inf")) < PROBE_EVERY_S:
         return False
     _last_probe[key] = now
+    return True
+
+
+def sweep_probe_id(observed_at: datetime) -> str:
+    return SWEEP_PROBE + observed_at.isoformat()
+
+
+def sweep_probe_due(provider: str, observed_at: datetime | None, now: datetime | None = None) -> bool:
+    """`probe_due` through the sweep's exhausted reading; the first probe waits a full interval
+    after the reading, as after a lock. Sync, no I/O."""
+    if observed_at is None or (now or utcnow_naive()) - observed_at < timedelta(seconds=PROBE_EVERY_S):
+        return False
+    return probe_due(SWEEP_PROBE + provider)
+
+
+async def clear_sweep_state(provider: str, *, probe_id: str) -> bool:
+    """A probe's 2xx through the sweep's exhausted reading: lift it until the next sweep reads the
+    balance again. A reading published after the probe was admitted is left alone."""
+    try:
+        async with session_maker() as db:
+            raw = await ratestore.kv_get(db, STATE_NS, provider)
+            if raw is None:
+                return False
+            state = LatestState.from_json(raw)
+            if (state.exhausted_until is None or state.observed_at is None
+                    or probe_id != sweep_probe_id(state.observed_at)):
+                return False
+            state.exhausted_until = None
+            state.health = "unknown"
+            state.note = f"a probe's 2xx lifted this exhausted reading; {state.note}"[:200]
+            await ratestore.kv_put(db, STATE_NS, provider, state.to_json(), ttl_s=STATE_TTL_S)
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("capacity state %s not cleared", provider, exc_info=True)
+        return False
     return True

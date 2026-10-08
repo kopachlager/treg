@@ -1511,3 +1511,69 @@ async def test_own_key_relays_idempotency_label_verbatim(clients: AsyncClient, m
                                   headers={"Idempotency-Key": "retry-1"})
     assert response.status_code == 201
     assert _upstream_idempotency_keys(relayed) == ["retry-1"]
+
+
+def _upstream_user_agents(relayed: list) -> list[str]:
+    return [v.decode() for req in relayed for k, v in req.raw_headers if k.lower() == b"user-agent"]
+
+
+async def test_shared_key_calls_carry_treg_user_agent_own_key_the_callers(
+    clients: AsyncClient, monkeypatch, replicate_platform,
+):
+    """On treg's key the provider sees treg's account, so it sees treg's User-Agent, never a library
+    default its bot rules block (LimaData and Wiza answered Cloudflare 1010 to Python's default)."""
+    from treg.config import TREG_USER_AGENT
+    relayed = []
+
+    async def fake_relay(request, *args, **kwargs):
+        relayed.append(request)
+        return _response(201, {"id": f"prediction-{len(relayed)}", "status": "starting"})
+
+    monkeypatch.setattr(call_service, "relay", fake_relay)
+    python = {"User-Agent": "Python-urllib/3.13"}
+    assert (await clients.post(f"/call/{EP}", json={"input": {"prompt": "a"}}, headers=python)).status_code == 201
+    assert _upstream_user_agents(relayed) == [TREG_USER_AGENT]
+    await clients.post("/secrets", json={"name": "replicate", "value": "own-token"})
+    assert (await clients.post(f"/call/{EP}", json={"input": {"prompt": "b"}}, headers=python)).status_code == 201
+    assert _upstream_user_agents(relayed)[1:] == ["Python-urllib/3.13"], "a team's own key relays the caller's header"
+
+
+@pytest.mark.parametrize("warm", [True, False])
+async def test_a_slow_first_catalog_load_does_not_time_out_a_poll(
+    clients: AsyncClient, monkeypatch, replicate_platform, warm,
+):
+    """A fresh worker process parses the whole catalog on its first read. That read used to happen
+    inside the timed poll and blocked the event loop past POLL_TIMEOUT_S, so polls timed out with a
+    fast provider. The tick now loads the catalog first, off the loop; the poll reads the cache."""
+    import time as _time
+    from treg.domain.catalog import store as catalog_store
+
+    call_id = await _due_submission(clients, monkeypatch, {"status": "succeeded", "output": ["url"]})
+    real_load, first = catalog_store.load, {"cold": True}
+
+    def slow_first_load():
+        if first["cold"]:
+            first["cold"] = False
+            _time.sleep(0.3)  # a blocking parse, as the real first load is
+        return real_load()
+
+    monkeypatch.setattr(catalog_store, "load", slow_first_load)
+    monkeypatch.setattr(task_app, "POLL_TIMEOUT_S", 0.1)
+
+    async def poll_reads_catalog(row, client):
+        catalog_store.load()  # as `_poll_target` does
+        await asyncio.sleep(0.01)  # then the provider request, where a passed deadline fires
+        return 200, json.dumps({"status": "succeeded", "output": ["url"]}).encode()
+
+    monkeypatch.setattr(task_app, "_poll", poll_reads_catalog)
+    if not warm:  # the old shape: nothing loads the catalog before the polls start
+        async def no_warm(fn, *a, **kw):
+            return None
+        monkeypatch.setattr(task_app.asyncio, "to_thread", no_warm)
+    result = await task_app.settle_due()
+    if warm:
+        assert result.settled == 1 and result.backed_off == 0
+    else:
+        assert result.settled == 0 and result.backed_off == 1
+    async with session_maker() as db:
+        assert (await db.get(AsyncTaskRecord, call_id)).status == ("settled" if warm else "pending")

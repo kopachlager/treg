@@ -105,6 +105,7 @@ class AutoTopupIn(BaseModel):
     threshold_usd: float | None = None
     amount_usd: float | None = None
     monthly_cap_usd: float | None = None
+    per_hour: int | None = None  # automatic charges allowed per hour after a successful one (1-60)
     # False when the caller is about to open a top-up Checkout anyway (the dashboard's modal): that
     # page saves the card too, so a second card-capture session would be a wasted Stripe call.
     setup_url: bool = True
@@ -180,7 +181,7 @@ async def billing_autotopup(
             org.id, enabled=body.enabled, consent=body.consent,
             threshold_usd=body.threshold_usd, amount_usd=body.amount_usd,
             monthly_cap_usd=body.monthly_cap_usd, return_base=_return_base(request),
-            email=caller.email, setup_url=body.setup_url)
+            email=caller.email, setup_url=body.setup_url, per_hour=body.per_hour)
     except billing.BillingJourneyError as e:
         raise _translate_billing_error(e) from e
 

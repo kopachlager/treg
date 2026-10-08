@@ -35,6 +35,8 @@ contracts:
       verified: {type: bool, note: "the provider says it checked the mailbox"}
     miss: "email == null"
     idempotent: true            # a lookup — error-fallback to the next provider is safe
+    # The provider's own claim, stored per call; a finder with no `verified` output stores none.
+    verdict: {from: verified, words: [verified, unverified], map: {true: verified, false: unverified}}
     # Attached as `_treg.advice` when a hit's `verified` is not true. A find is a guess the provider
     # scored, not a delivery check: 2026-09-06 one team sent to catch-all (`accept_all`) and
     # pattern-guessed hits without verifying and bounced on most of them.
@@ -156,6 +158,9 @@ contracts:
       score: {type: int}
     miss: "status == null"
     idempotent: true
+    # Stored per call. Each adapter maps its provider's words (`verdicts`); `unknown` is a word,
+    # not a miss, and catch-all is kept apart from `risky` so it can be counted on its own.
+    verdict: {from: status, words: [valid, invalid, catch_all, risky, unknown]}
 
   people.enrich:
     summary: "Enrich a person from an email, a LinkedIn URL or a name + company domain — treg picks the provider and names the one that served"
@@ -441,6 +446,7 @@ contracts:
     filters:
       country: {type: str, default: us}
       language: {type: str, default: en}
+      limit: {type: int, note: "article count where supported"}
     output:
       results: {type: list, required: true, note: "the provider's own news rows (title, link, source, date…)"}
       count: {type: int}
@@ -510,6 +516,30 @@ contracts:
       videos: {type: list, required: true}
       next_cursor: {type: str}
     miss: "videos == []"
+    idempotent: true
+
+  web.search.publications:
+    summary: "Search research publications by topic — provider-native paper rows in `results`"
+    identity:
+      - {q: str}
+    filters:
+      limit: {type: int, default: 10}
+    output:
+      results: {type: list, required: true}
+      count: {type: int}
+    miss: "results == []"
+    idempotent: true
+
+  google.serp.scholar:
+    summary: "Search Google Scholar publications — provider-native paper rows in `results`"
+    identity:
+      - {q: str}
+    filters:
+      limit: {type: int, default: 10}
+    output:
+      results: {type: list, required: true}
+      count: {type: int}
+    miss: "results == []"
     idempotent: true
 
   threads.search.posts:
@@ -587,7 +617,7 @@ contracts:
     idempotent: true
 
   tiktok.search.videos:
-    summary: "Search TikTok videos by keyword — provider-native video rows in `videos`"
+    summary: "Search TikTok videos by keyword, first page only — provider-native video rows in `videos`; to page deeper, call the provider named in X-Treg-Served-By directly with its offset or cursor"
     identity:
       - {q: str}
     filters:
@@ -1115,6 +1145,22 @@ contracts:
     idempotent: true
 
   # ---- open web -----------------------------------------------------------------------------
+  ai-search.perplexity.answer:
+    summary: "Ask Perplexity a question — the answer text and its cited sources; `source_kind` says whether it came from the Perplexity website or its model API"
+    identity:
+      - {prompt: str}
+    filters:
+      country: {type: str, default: "US", note: "ISO 3166-1 alpha-2: where the question is asked from"}
+    output:
+      answer: {type: str, required: true}
+      sources: {type: list, note: "the provider's own cited-source objects; raw is the same body"}
+      source_kind: {type: str, note: "website = the public Perplexity site, as a user there sees it; model_api = Perplexity's model API (sonar). The two cite largely different sources for the same question"}
+    miss: "answer == null"
+    idempotent: true
+    # DataForSEO answers far more often and much faster than Cloro (see their observed stats). Cloro reads the
+    # website itself; a caller who needs that sends X-Treg-Route-Prefer: cloro or calls it directly.
+    prefer: [dataforseo]
+
   web.search:
     summary: "Search the open web — provider-native result rows in `results`"
     identity:
@@ -1123,6 +1169,19 @@ contracts:
       limit: {type: int, default: 10, note: "maximum results, where the provider accepts one"}
     output:
       results: {type: list, required: true, note: "the provider's own ranked result objects; raw is the same body"}
+      count: {type: int}
+    miss: "results == []"
+    idempotent: true
+    prefer: [crawl4ai]
+
+  web.search.news:
+    summary: "Search recent news — provider-native article rows in `results`"
+    identity:
+      - {q: str}
+    filters:
+      limit: {type: int, default: 10, note: "maximum compared results; sent upstream where supported"}
+    output:
+      results: {type: list, required: true, note: "the provider's own ranked news articles"}
       count: {type: int}
     miss: "results == []"
     idempotent: true
@@ -1137,6 +1196,21 @@ contracts:
       count: {type: int}
     miss: "pages == []"
     idempotent: true
+    prefer: [crawl4ai]
+
+  web.extract.structured:
+    summary: "Extract typed JSON from one web page, described by a JSON schema and/or a plain-English instruction — the extracted data in `data`"
+    identity:
+      # Most complete first: the first variant the caller fills is the one every field rides on.
+      - {url: url, schema: object, instruction: str}
+      - {url: url, schema: object}
+      - {url: url, instruction: str}
+    filters: {}
+    output:
+      data: {type: any, required: true, note: "the extracted records, in the shape the schema asked for; raw is the provider's whole body"}
+    miss: "data == null"
+    idempotent: true
+    prefer: [crawl4ai]
 
   web.map:
     summary: "Discover the URLs on a website — provider-native map rows in `results`"

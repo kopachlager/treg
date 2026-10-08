@@ -53,6 +53,8 @@ _DATAPLANE_DERIVED_WRITES = {
         (overflow._maybe_overflow_attempt, "capacity_marks.strike"),
         (capacity_marks.strike, "ratestore.kv_put"),
         (capacity_marks.clear, "ratestore.kv_pop"),
+        (settle._note_capacity_recovery, "capacity_marks.clear_sweep_state"),
+        (capacity_marks.clear_sweep_state, "ratestore.kv_put"),
     ),
     # Plan §4.3 step 5: the overflow child's settle folds the aggregator's daily spend delta into
     # the SAME transaction; shadow mode records the probe's cost on its own short session.
@@ -120,6 +122,7 @@ _DERIVED_WRITE_FILES = {
     _SRC / "application" / "call" / "reserve.py": {"billing.maybe_schedule_autotopup"},
     _SRC / "application" / "call" / "settle.py": {
         "adsconv.queue", "capacity_marks.strike", "capacity_marks.clear",
+        "capacity_marks.clear_sweep_state",
         "overflow_spend_ledger.add_in_transaction", "archive.note_org_use_in_transaction",
     },
     _SRC / "application" / "call" / "overflow.py": {
@@ -157,6 +160,7 @@ _EXPECTED_DERIVED_WRITE_SITES = {
     ("application/call/settle.py", "_record_first_call", "adsconv.queue"),
     ("application/call/settle.py", "_note_capacity_signal", "capacity_marks.strike"),
     ("application/call/settle.py", "_note_capacity_recovery", "capacity_marks.clear"),
+    ("application/call/settle.py", "_note_capacity_recovery", "capacity_marks.clear_sweep_state"),
     ("application/call/settle.py", "_platform_settle", "overflow_spend_ledger.add_in_transaction"),
     ("application/call/settle.py", "_close", "overflow_spend_ledger.add_in_transaction"),
     ("application/call/settle.py", "_platform_settle", "archive.note_org_use_in_transaction"),
@@ -183,6 +187,7 @@ _EXPECTED_DERIVED_WRITE_SITES = {
      "provider_resources.tombstone"),
     ("domain/capacity/marks.py", "strike", "ratestore.kv_put"),
     ("domain/capacity/marks.py", "clear", "ratestore.kv_pop"),
+    ("domain/capacity/marks.py", "clear_sweep_state", "ratestore.kv_put"),
     ("domain/governance/publicdemo.py", "enforce_public_demo_ip_cap", "ratestore.rate_check"),
     ("domain/governance/publicdemo.py", "enforce_public_demo_ip_cap", "ratestore.sweep"),
     ("domain/money/__init__.py", "reap_stale_holds", "release"),

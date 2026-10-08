@@ -120,6 +120,7 @@ platforms:
 
   ebay: {label: "eBay", category: "E-commerce", summary: "Product listings and search results from eBay."}
   walmart: {label: "Walmart", category: "E-commerce", summary: "Product listings and search results from Walmart."}
+  home-depot: {label: "Home Depot", category: "E-commerce", summary: "Search Home Depot products by keyword."}
   yandex: {label: "Yandex Search Results (SERP)", category: "SEO/AEO", summary: "Organic results and rankings from Yandex."}
   duckduckgo: {label: "DuckDuckGo Search Results (SERP)", category: "SEO/AEO", summary: "Organic results from DuckDuckGo."}
   yelp: {label: "Yelp", category: "Reviews & Apps", summary: "Business listings and reviews from Yelp."}
@@ -157,6 +158,8 @@ capabilities:
   image-gen.gpt-image-2-5.generate: "GPT Image 2.5"
 
   creators.search: "Find influencers & creators by niche, country, followers & engagement on Instagram, TikTok, YouTube"
+  creators.photo.demographics: "Estimate age and gender from a creator's profile photo"
+  home-depot.products.search: "Search Home Depot products by keyword"
   # --- SEO / search -----------------------------------------------------------------------------
   google.serp.organic: "Get organic search results for a keyword"
   google.serp.ai_overview: "Get the AI Overview panel Google shows above a search result"
@@ -186,6 +189,7 @@ capabilities:
   web.search: "Search the open web by meaning or keyword"
   web.extract: "Extract clean content from web pages"
   web.extract.structured: "Extract typed JSON from one web page"
+  web.extract.batch: "Scrape a bounded list of web pages"
   web.screenshot: "Capture a rendered web page image"
   web.map: "Discover the URLs on a website"
   web.crawl: "Crawl a website and extract its pages"
@@ -229,7 +233,6 @@ capabilities:
   facebook.page.insights: "Your Page's reach & engagement"
   facebook.page.post.create: "Publish a post to your Page"
   facebook.page.posts: "List your Page's posts with engagement"
-  facebook.pages.list: "List the Pages you manage"
   google-ads.accounts: "List the ad accounts you can reach"
   google-ads.budget.update: "Change a campaign's daily budget"
   google-ads.query: "Query your own account with GAQL"
@@ -1282,7 +1285,30 @@ capability_titles:
   google.keywords.trends: "Keyword popularity over time"
   google.serp.ai_overview: "Get Google's AI Overview"
   google.serp.local: "Get Google local pack results"
-  web.answer: "Answer a question with cited sources"
+  web.backlinks.summary: "Backlink profile"
+  web.backlinks.list: "List backlinks"
+  web.backlinks.competitors: "Backlink competitors"
+  web.search: "Search the web"
+  web.search.news: "Search news"
+  web.search.publications: "Search research papers"
+  web.extract: "Extract web page content"
+  web.screenshot: "Website screenshot"
+  web.extract.structured: "Extract structured page data"
+  web.answer: "Answer with cited sources"
+  web.answer.status: "Check web research"
+  web.answer.research: "Research with web sources"
+  web.scrape.job.results: "Download scrape results"
+  web.scrape.job.start: "Start batch scrape"
+  web.scrape.job.status: "Check batch scrape"
+  web.scrape.structured: "Scrape structured data"
+  web.crawl: "Crawl a website"
+  web.crawl.status: "Check website crawl"
+  web.crawl.results: "List crawled pages"
+  web.anchors.list: "Anchor text"
+  web.linking_domains.list: "Referring domains"
+  web.map: "Discover site URLs"
+  web.site.top_pages: "Top pages by authority"
+  web.url.metrics: "URL and domain authority"
   linkedin.profile.from_email: "Find a LinkedIn profile from an email"
   video-gen.result.retrieve: "Download a finished video"
   tripadvisor.search.general: "Search places, hotels and restaurants"

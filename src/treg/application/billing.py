@@ -240,7 +240,24 @@ def autotopup_prefs(org: Org) -> dict:
         "threshold_micro": int(org.autotopup_threshold_micro or usd_to_micro(s.autotopup_default_threshold_usd)),
         "amount_micro": int(org.autotopup_amount_micro or usd_to_micro(s.autotopup_default_amount_usd)),
         "monthly_cap_micro": int(org.autotopup_monthly_cap_micro or usd_to_micro(s.autotopup_monthly_cap_usd)),
+        "per_hour": int(org.autotopup_max_per_hour or s.autotopup_default_per_hour),
     }
+
+
+def autotopup_wait_s(org: Org) -> int:
+    """Seconds between two automatic charges: an hour after a failed one (a declined card is not
+    retried every few minutes), else an hour divided by the team's charges-per-hour."""
+    s = get_settings()
+    if org.autotopup_failures:
+        return s.autotopup_cooldown_s
+    return 3600 // max(1, autotopup_prefs(org)["per_hour"])
+
+
+def validate_per_hour(value) -> int:
+    n = int(value)
+    if not 1 <= n <= 60:
+        raise ValueError("charges per hour must be between 1 and 60")
+    return n
 
 
 def _month_start() -> datetime:
@@ -308,9 +325,10 @@ async def get_or_create_customer(db: AsyncSession, org: Org, *, email: str = "")
     return org.stripe_customer_id
 
 
-async def _set_default_pm(db: AsyncSession, org_id: int, payment_method: str | None) -> bool:
+async def _set_default_pm(db: AsyncSession, org_id: int, payment_method: str | None, *,
+                          paid: bool = False) -> bool:
     """Remember which saved card to charge off-session. An opaque `pm_…` reference — no card data
-    ever reaches our database. Returns True when something changed."""
+    ever reaches our database. Returns True when something changed. `paid`: this card just paid."""
     if not payment_method:
         return False
     org = await db.get(Org, org_id)
@@ -321,22 +339,29 @@ async def _set_default_pm(db: AsyncSession, org_id: int, payment_method: str | N
     # A card arriving is what a consented-but-cardless policy was waiting for, whichever door it came
     # through: the dashboard's top-up modal records consent and then relies on the top-up Checkout to
     # save the card, so the PAYMENT webhook has to arm it, not only the setup one. Checked even when
-    # the pm is unchanged (a redelivered webhook after a crash between the two commits), and only for
-    # the `no_card` shape — a decline, 3DS, or a deliberate off stays off until a human re-enables it.
-    armed = _arm_if_waiting_for_card(org)
+    # the pm is unchanged (a redelivered webhook after a crash between the two commits). Declines
+    # re-arm on a card that just paid or a newly saved one; 3DS and a deliberate off stay off.
+    armed = _arm_if_waiting_for_card(org, card_proven=paid or changed)
     if changed or armed:
         db.add(org)
         await db.commit()
     return changed
 
 
-def _arm_if_waiting_for_card(org: Org) -> bool:
-    """Turn a consented policy on once `org.stripe_default_pm` exists. Mutates, does not commit."""
+def _arm_if_waiting_for_card(org: Org, *, card_proven: bool = False) -> bool:
+    """Turn a consented policy back on when the reason it was off is gone. Mutates, does not commit.
+
+    `no_card`: a card now exists. `max_attempts:*` (repeated declines): only when `card_proven`, a
+    card that just paid or a newly saved one. Before this a decline never re-armed, so a team paying
+    by hand with a working card kept auto top-up off and kept getting balance refusals.
+    """
     if not (org.stripe_default_pm and org.autotopup_consented_at) or org.autotopup_enabled:
         return False
-    # ONLY the explicit `no_card` state. A deliberate off leaves the reason None with consent still
-    # on file, and a later (or redelivered) payment must not switch it back on.
-    if org.autotopup_disabled_reason != "no_card":
+    # A deliberate off leaves the reason None with consent still on file, and a later (or
+    # redelivered) payment must not switch it back on. 3DS (`authentication_required`) stays off: an
+    # off-session charge would need the bank's check again.
+    reason = org.autotopup_disabled_reason or ""
+    if not (reason == "no_card" or (card_proven and reason.startswith("max_attempts:"))):
         return False
     org.autotopup_enabled = True
     org.autotopup_disabled_reason = None
@@ -716,7 +741,7 @@ async def attempt_auto_topup(db: AsyncSession, org_id: int) -> dict:
             await _disable_autotopup(db, org, "max_attempts")
             return {"ok": False, "reason": "max_attempts"}
         last = org.autotopup_last_attempt_at
-        if last is not None and (_now() - last).total_seconds() < s.autotopup_cooldown_s:
+        if last is not None and (_now() - last).total_seconds() < autotopup_wait_s(org):
             return {"ok": False, "reason": "cooldown"}
 
         balance = await ledger.balance_of(db, org_id)
@@ -827,6 +852,11 @@ def maybe_schedule_autotopup(org: Org) -> bool:
     if not (org.stripe_customer_id and org.stripe_default_pm):
         return False
     if org.balance_micro >= autotopup_prefs(org)["threshold_micro"]:
+        return False
+    # The DB re-checks under its lock; this only spares a task per call while the wait runs, which
+    # matters now that a REFUSED call schedules too (a team at $0 refuses thousands an hour).
+    last = org.autotopup_last_attempt_at
+    if last is not None and (_now() - last).total_seconds() < autotopup_wait_s(org):
         return False
     org_id = int(org.id)
     if org_id in _scheduled:
@@ -1062,7 +1092,7 @@ async def _on_checkout_completed(db: AsyncSession, session: dict) -> dict:
                            attribution=session.get("metadata") or {})
     # The Checkout saved the card (setup_future_usage); remember it so auto-top-up can be armed
     # without asking for a second card entry.
-    await _set_default_pm(db, org_id, pm_id)
+    await _set_default_pm(db, org_id, pm_id, paid=True)
     return result
 
 
@@ -1081,7 +1111,7 @@ async def _on_payment_succeeded(db: AsyncSession, pi: dict) -> dict:
         return {"handled": False, "reason": "zero amount"}
     result = await _credit(db, org_id, amount_micro, pi["id"], auto=meta.get("treg_auto") == "1", attribution=meta)
     pm = pi.get("payment_method")
-    await _set_default_pm(db, org_id, pm if isinstance(pm, str) else (pm or {}).get("id"))
+    await _set_default_pm(db, org_id, pm if isinstance(pm, str) else (pm or {}).get("id"), paid=True)
     return result
 
 
@@ -1208,6 +1238,8 @@ async def billing_state(db: AsyncSession, org: Org) -> dict:
             "last_attempt_at": org.autotopup_last_attempt_at.isoformat() if org.autotopup_last_attempt_at else None,
             "recovery_payment_intent": org.autotopup_recovery_pi,
             "cooldown_s": s.autotopup_cooldown_s,
+            "per_hour": prefs["per_hour"],
+            "wait_s": autotopup_wait_s(org),
             "max_attempts": s.autotopup_max_attempts,
         },
     }
@@ -1215,7 +1247,7 @@ async def billing_state(db: AsyncSession, org: Org) -> dict:
 
 async def set_autotopup(
     db: AsyncSession, org: Org, *, enabled: bool, consent: bool,
-    threshold_usd=None, amount_usd=None, monthly_cap_usd=None,
+    threshold_usd=None, amount_usd=None, monthly_cap_usd=None, per_hour=None,
 ) -> None:
     """Store the org's auto-top-up preferences and its consent timestamp. Commits.
 
@@ -1230,6 +1262,8 @@ async def set_autotopup(
         org.autotopup_amount_micro = usd_to_micro(validate_topup_usd(amount_usd))
     if monthly_cap_usd is not None:
         org.autotopup_monthly_cap_micro = usd_to_micro(validate_topup_usd(monthly_cap_usd))
+    if per_hour is not None:
+        org.autotopup_max_per_hour = validate_per_hour(per_hour)
     if enabled:
         if consent:
             org.autotopup_consented_at = _now()
@@ -1291,7 +1325,7 @@ async def start_topup(
 async def configure_autotopup(
     org_id: int, *, enabled: bool, consent: bool, threshold_usd: float | None,
     amount_usd: float | None, monthly_cap_usd: float | None, return_base: str, email: str,
-    setup_url: bool = True,
+    setup_url: bool = True, per_hour: int | None = None,
 ) -> dict:
     async with _db.session_maker() as db:
         org = await _journey_org(db, org_id)
@@ -1304,8 +1338,8 @@ async def configure_autotopup(
             await set_autotopup(
                 db, org, enabled=enabled, consent=consent,
                 threshold_usd=threshold_usd, amount_usd=amount_usd,
-                monthly_cap_usd=monthly_cap_usd)
-        except TopupRejected as e:
+                monthly_cap_usd=monthly_cap_usd, per_hour=per_hour)
+        except (TopupRejected, ValueError) as e:
             raise BillingJourneyError("rejected", str(e)) from e
         state = await billing_state(db, org)
         if enabled and setup_url and not org.stripe_default_pm:

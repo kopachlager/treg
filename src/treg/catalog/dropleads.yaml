@@ -225,6 +225,10 @@ endpoints:
     method: POST
     path: /api/v2/prime-db/leads/simple-enrich
     name: Enrich a person
+    miss:
+      status: 400
+      when: "error == 'Person not found. Try providing more information like LinkedIn URL or company name.'"
+      means: "nobody matched the identity (400 with this exact error) — a normal, free outcome, not a bad request. Other 400 bodies stay real request errors."
     summary: Enrich one person without requiring a verified email result.
     input:
       <<: *verified_person_input

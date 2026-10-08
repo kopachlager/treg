@@ -29,6 +29,29 @@ proposed_capabilities:
   web.screenshot.advanced: Capture a web screenshot with browser controls
   web.screenshot.download: Download a screenshot captured under the connected key
 endpoints:
+- id: litescrape.google.serp.news
+  capability: google.serp.news
+  platform: google
+  domain: search
+  scope: any_account
+  method: GET
+  path: /api/google/search
+  name: Search Google News
+  summary: Search Google News articles using Litescrape's news vertical.
+  input:
+    queryParams:
+      q: {type: string, required: true, maxLength: 2048}
+      tbm: {type: string, required: true, enum: [nws]}
+      num: {type: integer, required: false, min: 1, max: 10}
+      hl: {type: string, required: false}
+  test_request: {queryParams: {q: "AI policy", tbm: nws, num: 10, hl: en}}
+  cost: {type: per_success, value: 0.00015, currency: USD, per: 1, unit: call,
+         source: docs, source_url: "https://litescrape.com/pricing", checked: '2026-10-05',
+         confidence: verified, note: "The news vertical uses the same Google Search request and per-success price."}
+  docs_url: https://litescrape.com/docs/google-search
+  strict_query: true
+  verified: '2026-10-05'
+  example_response: examples/litescrape.google.serp.news.json
 - id: litescrape.google.serp.organic
   capability: google.serp.organic
   platform: google
@@ -3651,7 +3674,7 @@ endpoints:
   scope: any_account
   method: POST
   path: /api/web/fetch
-  name: Fetch rendered web content with browser options
+  name: "Web extraction with browser options"
   summary: Fetch a public HTTP(S) page and return LLM-ready content
   input:
     queryParams:
@@ -4048,7 +4071,7 @@ endpoints:
   scope: any_account
   method: POST
   path: /api/web/screenshot
-  name: Capture a web page screenshot with browser options
+  name: "Screenshot with browser options"
   platform_blocked: The image download needs the same key and treg cannot assign the returned URL to one organization on a shared account. Connect your own Litescrape key.
   summary: Capture a public HTTP(S) page as a PNG
   input:

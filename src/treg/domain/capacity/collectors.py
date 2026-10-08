@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 
-from ...config import get_settings, platform_setting_name
+from ...config import TREG_USER_AGENT, get_settings, platform_setting_name
 
 # provider → coroutine(client, key) → {"value": float|None, "unit": str, "note": str}.
 # `unit` says what the number IS ("USD", "credits", "units left", "rows used") — the one lesson of
@@ -401,23 +401,6 @@ async def _dropleads(c, key):
     }
 
 
-async def _quickenrich(c, key):
-    # Free discovery carries the remaining subscription allowance; no account endpoint exists.
-    r = await c.post("https://app.quickenrich.io/api/employees/contact-finder",
-                     headers={"Authorization": f"Bearer {key}"},
-                     json={"company_url": {"include": ["treg-probe-nonexistent.invalid"], "exclude": []},
-                           "per_page": 1})
-    r.raise_for_status()
-    doc = r.json()
-    meta = doc.get("meta") if isinstance(doc, dict) else None
-    remaining = meta.get("remaining_credits") if isinstance(meta, dict) else None
-    # Missing or unclear allowance data is unknown, never evidence of an unlimited plan.
-    if not isinstance(doc, dict) or doc.get("success") is not True or type(remaining) is not int or remaining < 0:
-        return {"value": None, "unit": "credits", "note": "No finite subscription allowance reported; check QuickEnrich plan"}
-    return {"value": remaining, "unit": "credits",
-            "note": "Subscription allowance; resets at renewal, no auto-top-up. Reset date not reported."}
-
-
 async def _prospeo(c, key):
     d = await _get(c, "https://api.prospeo.io/account-information",
                    headers={"X-KEY": key})
@@ -713,6 +696,24 @@ async def _tomba(c, key):
                     f"plan {((d.get('pricing') or {}).get('name', '?'))}"}
 
 
+async def _hlrlookup(c, key):
+    # Free. Both halves of the pair ride in the JSON body; the secret has its own platform slot
+    # (HLRLOOKUP.platform_extra_setting). Credits can be fractional (cache hits cost half a credit).
+    secret = get_settings().platform_key_hlrlookup_secret or ""
+    r = await c.post("https://api.hlrlookup.com/apiv2/balance",
+                     json={"api_key": key, "api_secret": secret})
+    r.raise_for_status()
+    d = r.json()
+    raw = d.get("Credits") if isinstance(d, dict) and d.get("Status") == "OK" else None
+    try:
+        balance = Decimal(str(raw)) if not isinstance(raw, bool) and raw is not None else None
+    except (InvalidOperation, ValueError):
+        balance = None
+    if balance is None or not balance.is_finite() or balance < 0:
+        raise ValueError("HLR Lookup balance returned an invalid credit count")
+    return {"value": float(balance), "unit": "credits", "note": ""}
+
+
 async def _predictleads(c, key):
     # The platform slot holds base64("api_key:api_token") for HTTP Basic — pass it straight through.
     d = await _get(c, "https://predictleads.com/api/v3/api_subscription",
@@ -904,6 +905,13 @@ async def _cloro(c, key):
             "note": f"{d.get('perCycle')} per cycle; cycle resets {(d.get('cycleResetsAt') or '?')[:10]}"}
 
 
+async def _crawl4ai(c, key):
+    d = await _get(c, "https://api.crawl4ai.com/v1/billing/balance", headers={"Authorization": f"Bearer {key}"})
+    mc = d.get("credit_mc")
+    return {"value": _balance(mc / 1000 if type(mc) in (int, float) else None, "Crawl4AI"), "unit": "credits",
+            "note": f"plan {d.get('tier')}"}
+
+
 async def _reapi(c, key):
     # GET /api/v1/balance does not consume credits; 1 credit = $0.001 (reapi.ai/docs/api/balance).
     d = await _get(c, "https://reapi.ai/api/v1/balance", headers={"Authorization": f"Bearer {key}"})
@@ -923,6 +931,7 @@ async def _piapi(c, key):
 BALANCE_ROUTES = {
     "anyapi": _anyapi,
     "cloro": _cloro,
+    "crawl4ai": _crawl4ai,
     "piapi": _piapi,
     "reapi": _reapi,
     "enrichlayer": _enrichlayer,
@@ -945,6 +954,7 @@ BALANCE_ROUTES = {
     "oceanio": _oceanio,
     "predictleads": _predictleads,
     "tomba": _tomba,
+    "hlrlookup": _hlrlookup,
     "dataforseo": _dataforseo,
     "tikhub": _tikhub,
     "tinyfish": _tinyfish,
@@ -966,7 +976,6 @@ BALANCE_ROUTES = {
     "hunter": _hunter,
     "harvestapi": _harvestapi,
     "fetchinio": _fetchinio,
-    "quickenrich": _quickenrich,
     "prospeo": _prospeo,
     "aiark": _aiark,
     "wiza": _wiza,
@@ -993,6 +1002,10 @@ BALANCE_ROUTES = {
 # obtain. Kept explicit so the report names them instead of silently skipping, and so a future probe
 # has a list of what to re-check.
 NO_BALANCE_API = {
+    "quickenrich": "no balance endpoint, and no response carries the allowance any more: a free "
+                   "Contact Finder miss or hit and a billed employee search all return a meta without "
+                   "remaining_credits (or no meta), despite the published docs; the subscription "
+                   "allowance is visible in the QuickEnrich dashboard only",
     "octen": "no account balance or usage endpoint in the published OpenAPI; "
              "PAYG USD balance and usage are visible in the provider dashboard",
     "valyu": "no documented API endpoint for remaining credits or account usage; "
@@ -1045,7 +1058,7 @@ NO_BALANCE_API = {
 
 # platform_key_* slots that are the SECOND half of a provider's credential pair, not a provider of
 # their own (see OAuthProvider.platform_extra_setting) — they must not become report rows.
-AUX_SLOTS = {"tomba_secret"}
+AUX_SLOTS = {"tomba_secret", "hlrlookup_secret"}
 
 
 def all_platform_providers() -> list[str]:
@@ -1077,7 +1090,7 @@ async def provider_balance(provider: str, client: httpx.AsyncClient | None = Non
                 "note": "no fetcher written yet"}
     try:
         if client is None:
-            async with httpx.AsyncClient(timeout=30) as c:
+            async with httpx.AsyncClient(timeout=30, headers={"User-Agent": TREG_USER_AGENT}) as c:
                 row = await fetch(c, key)
         else:
             row = await fetch(client, key)

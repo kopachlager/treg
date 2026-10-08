@@ -38,6 +38,11 @@ EXPECTED_MAKERS: dict[str, set[str]] = {
     "application/provider_resources.py": {API},
     # Interactive paid runs: short transactions between legs, never across upstream waits.
     "application/arena.py": {API},
+    "application/web_arena.py": {API},
+    "application/web_arena_quality.py": {API},
+    "application/web_arena_publications.py": {API},
+    # Request previews read a short snapshot; scheduled call folding uses the worker process.
+    "application/web_arena_calls.py": {API},
     # `/table/`: one short read of a hub tool's manifest, after the call's answer is fully read.
     "application/table.py": {API},
     # Snapshot read on the request path; the collector runs in the `treg-worker` process (see
@@ -53,6 +58,8 @@ EXPECTED_MAKERS: dict[str, set[str]] = {
 
     "application/referrals.py": {API}, "application/signup.py": {API},
     "application/onboard/__init__.py": {API},
+    # The first-run lookup: a short write per finished step, never across a GitHub, LLM or call wait.
+    "application/onboard/first_run.py": {API},
     "application/call/authorize.py": {API}, "application/call/idempotency.py": {API},
     "application/call/intake.py": {API}, "application/call/overflow.py": {API},
     "application/call/reserve.py": {API}, "application/call/resolve.py": {API},

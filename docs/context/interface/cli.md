@@ -317,7 +317,9 @@ Bare **`treg connections`** now lists (the subparser is `required=False` with a 
   lifetime) and its RUN IT template ends in `--await --timeout 900`. `--await [--timeout 900]`
   reads `X-Treg-Async`; without the header it is a no-op. Descriptor semantics come from `treg.domain.asynctasks` (stdlib-only, see
   the import-boundaries fragment), not a CLI-side copy. With the header it prints the task id and a resumable `treg call` command to
-  stderr, polls static catalog ids or allow-listed dynamic URLs through `/call/`, retries network/5xx
+  stderr, polls static catalog ids or allow-listed dynamic URLs through `/call/` every descriptor
+  `interval` and never past its `max_age`, prints a submission that is already finished
+  (`terminal_on_submission`) without polling, retries network/5xx
   failures with backoff up to five consecutive failures, and keeps waiting on unknown status values
   after one warning. Stdout contains only the terminal polling response bytes. Exit codes are 0 for
   success, 2 for a provider terminal failure, 3 for timeout/interruption/recoverable polling failure,

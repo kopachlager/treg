@@ -387,12 +387,14 @@ adapters:
     # unknown as uncharged; treating it as a miss lets the existing generic success settlement
     # release the hold and lets a routed waterfall continue.
     miss: "coalesce(status, 'unknown') == 'unknown'"
+    verdicts: {spamtrap: invalid, abuse: risky, do_not_mail: risky}
   trykitt.people.email.verify:
     accepts: [[email]]
     in: {email: body.email}
     const: {body.realtime: true}
     out: {valid: "validity == 'valid'", status: validity}
     miss: "validity == null"
+    verdicts: {catchall: catch_all}
   contactout.people.email.verify:
     accepts: [[email]]
     in: {email: queryParams.email}
@@ -401,19 +403,24 @@ adapters:
     # Require both a successful envelope and a nonempty verdict, using existing expressions.
     # at_least takes the maximum of the two predicates (0/1): either failure is a miss.
     miss: "at_least(status_code != 200, coalesce(data.status) == null)"
+    verdicts: {accept_all: catch_all}
   millionverifier.people.email.verify:
     accepts: [[email]]
     in:  {email: queryParams.email}
     out: {valid: "result == 'ok'", status: result}
     # Like peer verifiers, risky/invalid verdicts are answers; API errors omit quality.
     miss: "quality == null"
+    verdicts: {ok: valid, disposable: risky, unverified: unknown}
   bounceban.people.email.verify:
     accepts: [[email]]
     in: {email: queryParams.email}
     out: {valid: "result == 'deliverable'", status: result, score: score}
-    # A standard submission can return status=verifying before the verdict exists. It was billed,
-    # but it is not a routed answer yet, so the existing waterfall may continue.
+    # A status=verifying submission is waited for (the endpoint's `async` block) and judged on
+    # its finished answer, so this rule sees only finished answers: one without a verdict is a miss.
     miss: "result == null"
+    # BounceBan reports a catch-all domain as a flag next to `risky`.
+    verdict: "choose(is_accept_all == true, choose(result == 'risky', 'catch_all', result), result)"
+    verdicts: {deliverable: valid, undeliverable: invalid}
   leadmagic.people.email.verify:
     accepts: [[email]]
     in:  {email: body.email}
@@ -424,16 +431,20 @@ adapters:
     in:  {email: queryParams.email}
     out: {valid: "data.email.status == 'valid'", status: data.email.status, score: data.email.score}
     miss: "data.email.status == null"
+    verdicts: {accept_all: catch_all}
   hunter.people.email.verify:
     accepts: [[email]]
     in:  {email: queryParams.email}
     out: {valid: "data.status == 'valid'", status: data.status, score: data.score}
     miss: "data.status == null"
+    verdicts: {accept_all: catch_all, webmail: unknown, disposable: risky}
   limadata.people.email.verify:
     accepts: [[email]]
     in: {email: body.email}
     out: {valid: "result == 'Valid'", status: result, score: score}
     miss: "result == null"
+    # LimaData reports a catch-all domain as a flag next to `Risky`.
+    verdict: "choose(is_catch_all == true, choose(result == 'Risky', 'catch_all', result), result)"
 
   # ---- people.enrich ------------------------------------------------------------------------
   dropleads.people.enrich:
@@ -470,6 +481,12 @@ adapters:
     out: {full_name: data.full_name, first_name: data.first_name, last_name: data.last_name, title: data.position,
           company: data.company, company_domain: data.website_url, linkedin_url: data.linkedin, location: data.country}
     miss: "data.full_name == null"
+  oceanio.people.enrich:
+    accepts: [[linkedin_url], [full_name, domain]]
+    in: {linkedin_url: body.person.linkedin, full_name: body.person.name, domain: body.company.domain}
+    out: {full_name: name, first_name: firstName, last_name: lastName, title: jobTitle,
+          company_domain: domain, linkedin_url: linkedinUrl, location: location}
+    miss: "name == null"
   hunter.people.enrich:
     accepts: [[email], [linkedin_handle]]
     in:  {email: queryParams.email, linkedin_handle: queryParams.linkedin_handle}
@@ -672,6 +689,15 @@ adapters:
     const: {body.page: 1, body.pageSize: 10}
     out: {companies: items, count: totalItems}
     miss: "items == []"
+  oceanio.companies.lookalike:
+    accepts: [[domain]]
+    in: {domain: body.companiesFilters.lookalikeDomains}
+    in_expr: {body.companiesFilters.lookalikeDomains: "list(domain)"}
+    # The shared key requires an explicit size of 1-100, and size is the whole price.
+    const: {body.size: 10}
+    cost_units: "10"
+    out: {companies: companies, count: total}
+    miss: "companies == []"
 
   # ---- people.search ------------------------------------------------------------------------
   dropleads.people.search:
@@ -756,6 +782,14 @@ adapters:
     in_expr: {body.filters.contacts.include.jobTitles: "list(title)", body.pagination.size: "at_least(limit, 10)", body.pagination.page: "0"}
     out: {people: results, count: pagination.total}
     miss: "results == []"
+  oceanio.people.search:
+    accepts: [[company_domain]]
+    in: {company_domain: body.companiesFilters.includeDomains}
+    in_expr: {body.companiesFilters.includeDomains: "list(company_domain)",
+              body.size: "at_most(limit, 100)"}
+    cost_units: "at_most(limit, 100)"
+    out: {people: people, count: total, next_cursor: searchAfter}
+    miss: "people == []"
 
   apollo.people.enrich:
     accepts: [[email], [linkedin_url], [full_name, domain]]
@@ -1056,6 +1090,15 @@ adapters:
     const: {body.category: company}
     out: {companies: results, count: "len(results)"}
     miss: "results == []"
+  oceanio.companies.search:
+    # Domain only: industries take Ocean.io's exact vocabulary (free text is a false miss) and
+    # technologies is an object, not a list.
+    accepts: [[domain]]
+    in: {domain: body.companiesFilters.includeDomains}
+    in_expr: {body.companiesFilters.includeDomains: "list(domain)", body.size: "at_most(limit, 100)"}
+    cost_units: "at_most(limit, 100)"
+    out: {companies: companies, count: total, next_cursor: searchAfter}
+    miss: "companies == []"
   hunter.x.discover-companies:
     accepts: [[q]]
     in:  {q: body.query}
@@ -1120,8 +1163,9 @@ adapters:
     miss: "data == []"
   tomba.companies.search.reveal:
     accepts: [[industry]]
-    in:  {industry: body.filters.industry, country: body.filters.country}
-    in_expr: {body.filters: "obj('country', list(country), 'industry', list(industry))", body.page: "1"}
+    # each filter is {include: [...]} and country is `location_country`; the old flat shape is ignored
+    in:  {industry: body.filters.industry.include, country: body.filters.location_country.include}
+    in_expr: {body.filters: "obj('industry', obj('include', list(industry)), 'location_country', obj('include', list(country)))", body.page: "1"}
     out: {companies: data.companies, count: meta.total}
     miss: "data.companies == []"
   thecompaniesapi.companies.search:
@@ -1154,9 +1198,9 @@ adapters:
     accepts: [[q]]
     in:  {q: body.searchStringsArray}
     in_expr: {body.searchStringsArray: "list(q)", body.locationQuery: "country_name(country)", body.language: language}
-    # treg's key needs the run's spend cap, timeout and memory; 20 places bill at most 20 rows + the start.
-    const: {queryParams.maxTotalChargeUsd: "0.25", queryParams.timeout: "90", queryParams.memory: "1024",
-            body.maxCrawledPlacesPerSearch: 20, body.maxCrawledPlaces: 20, body.scrapeContacts: false,
+    # treg's key needs the run's spend cap, timeout and memory; Arena compares ten places.
+    const: {queryParams.maxTotalChargeUsd: "0.12", queryParams.timeout: "90", queryParams.memory: "1024",
+            body.maxCrawledPlacesPerSearch: 10, body.maxCrawledPlaces: 10, body.scrapeContacts: false,
             body.scrapePlaceDetailPage: false, body.maxReviews: 0}
     out: {places: ".", count: "len(.)"}
     miss: ". == []"
@@ -1180,6 +1224,14 @@ adapters:
     in_expr: {queryParams.count: limit}
     out: {videos: data.aweme_list, next_cursor: data.max_cursor, has_more: data.has_more}
     miss: "data.aweme_list == []"
+  tikhub.tiktok.user.videos:
+    # evidence only: its empty itemList on an active account becomes a measured miss; app-v3 already routes the same lookup
+    route: false
+    accepts: [[sec_uid]]
+    in:  {sec_uid: queryParams.secUid}
+    in_expr: {queryParams.count: limit}
+    out: {videos: data.itemList, next_cursor: data.cursor, has_more: data.hasMore}
+    miss: "coalesce(data.itemList, []) == []"
   # tikhub.x.tiktok-app-v3-fetch-user-post-videos-v3: its example carries no aweme_list — v1/v2 cover the same lookup.
 
   # ---- linkedin.user.profile (batch 5) ---------------------------------------------------------
@@ -1247,10 +1299,17 @@ adapters:
   dataforseo.x.serp-google-news-live-advanced:
     accepts: [[q]]
     in:  {q: body.keyword}
-    in_expr: {body.location_code: "dfs_location(country)", body.language_code: language}
+    in_expr: {body.location_code: "dfs_location(country)", body.language_code: language, body.depth: limit}
     body_array: true
     out: {results: "tasks[0].result[0].items", count: "tasks[0].result[0].items_count"}
     miss: "tasks[0].result[0].items == []"
+  litescrape.google.serp.news:
+    accepts: [[q]]
+    in: {q: queryParams.q}
+    in_expr: {queryParams.num: limit, queryParams.hl: language}
+    const: {queryParams.tbm: nws}
+    out: {results: news_results, count: "len(news_results)"}
+    miss: "coalesce(news_results, []) == []"
   serpapi.x.google-news:
     accepts: [[q]]
     in:  {q: queryParams.q}
@@ -1258,6 +1317,19 @@ adapters:
     const: {queryParams.engine: google_news}
     out: {results: news_results}
     miss: "news_results == []"
+  serper.google.serp.news:
+    accepts: [[q]]
+    in: {q: body.q}
+    in_expr: {body.gl: "lower(country)", body.hl: language, body.num: limit}
+    out: {results: news, count: "len(news)"}
+    miss: "coalesce(news, []) == []"
+  cloro.google.serp.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.gl: "upper(country)", body.hl: language}
+    const: {body.pages: 1}
+    out: {results: result.newsResults, count: "len(result.newsResults)"}
+    miss: "coalesce(result.newsResults, []) == []"
 
   # ---- instagram.search.reels (batch 5) --------------------------------------------------------
   justoneapi.x.instagram-search-reels-v1:
@@ -1364,8 +1436,8 @@ adapters:
   justoneapi.x.youtube-search-v1:
     accepts: [[q]]
     in:  {q: queryParams.keyword}
-    out: {videos: data.videos, next_cursor: data.continuation_token}
-    miss: "data.videos == []"
+    out: {videos: "coalesce(data.items, data.videos)", next_cursor: "coalesce(data.nextToken, data.continuation_token)"}
+    miss: "coalesce(data.items, data.videos, []) == []"
   tikhub.youtube.search.videos:
     accepts: [[q]]
     in:  {q: queryParams.keyword}
@@ -2654,7 +2726,7 @@ adapters:
   anyapi.google.serp.news:
     accepts: [[q]]
     in:  {q: body.query}
-    in_expr: {body.gl: "lower(country)", body.hl: language}
+    in_expr: {body.gl: "lower(country)", body.hl: language, body.limit: limit}
     out: {results: output.data.items, count: "len(output.data.items)"}
     miss: "coalesce(output.data.items, []) == []"
   anyapi.google.serp.maps.place:
@@ -2670,12 +2742,72 @@ adapters:
     miss: "coalesce(output.data.suggestions, []) == []"
 
   # ---- open web -----------------------------------------------------------------------------
+  search1api.web.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.max_results: limit}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  tinyfish.web.search.news:
+    accepts: [[q]]
+    in: {q: queryParams.query}
+    const: {queryParams.domain_type: news}
+    out: {results: results, count: "coalesce(total_results, len(results))"}
+    miss: "coalesce(results, []) == []"
+  exa.web.search.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.numResults: limit}
+    const: {body.category: news}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  exa.web.search.publications:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.numResults: limit}
+    const: {body.category: publication}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  tinyfish.web.search.publications:
+    accepts: [[q]]
+    in: {q: queryParams.query}
+    const: {queryParams.domain_type: research_paper}
+    out: {results: results, count: "coalesce(total_results, len(results))"}
+    miss: "coalesce(results, []) == []"
+  serper.google.serp.scholar:
+    accepts: [[q]]
+    in: {q: body.q}
+    out: {results: organic, count: "len(organic)"}
+    miss: "coalesce(organic, []) == []"
   search1api.web.search:
     accepts: [[q]]
     in: {q: body.query}
     in_expr: {body.max_results: limit}
     out: {results: results, count: "len(results)"}
     miss: "coalesce(results, []) == []"
+  diffbot.x.web-search:
+    accepts: [[q]]
+    in: {q: queryParams.text}
+    in_expr: {queryParams.size: limit}
+    test_identity: {q: "knowledge graph AI"}
+    out: {results: search_results, count: "len(search_results)"}
+    miss: "coalesce(search_results, []) == []"
+  # ---- ai-search.perplexity.answer: two sources, said in `source_kind` --------------------------
+  dataforseo.x.ai-optimization-perplexity-llm-responses-live:
+    accepts: [[prompt]]
+    in: {prompt: body.user_prompt}
+    in_expr: {body.web_search_country_iso_code: country}
+    const: {body.model_name: sonar}
+    body_array: true
+    out: {answer: "tasks[0].result[0].items[0].sections[0].text",
+          sources: "tasks[0].result[0].items[0].sections[0].annotations", source_kind: "'model_api'"}
+    miss: "tasks[0].result[0].items[0].sections[0].text == null"
+  cloro.ai-search.perplexity.answer:
+    accepts: [[prompt]]
+    in: {prompt: body.prompt}
+    in_expr: {body.country: country}
+    out: {answer: result.text, sources: result.sources, source_kind: "'website'"}
+    miss: "result.text == null"
   perplexity.web.search.fast:
     accepts: [[q]]
     in: {q: body.query}
@@ -2716,6 +2848,13 @@ adapters:
     const: {body.search_depth: basic, body.include_usage: true}
     out: {results: results, count: "len(results)"}
     miss: "coalesce(results, []) == []"
+  tavily.web.search.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.max_results: limit}
+    const: {body.topic: news, body.search_depth: basic, body.include_usage: true}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
   linkup.web.search:
     accepts: [[q]]
     in: {q: body.q}
@@ -2747,9 +2886,27 @@ adapters:
   serper.web.search:
     accepts: [[q]]
     in: {q: body.q}
-    in_expr: {body.gl: "lower(country)", body.hl: language}
+    in_expr: {body.gl: "lower(country)", body.hl: language, body.num: limit}
     out: {results: organic, count: "len(organic)"}
     miss: "coalesce(organic, []) == []"
+  spidercloud.web.search:
+    accepts: [[q]]
+    in: {q: body.search}
+    in_expr: {body.search_limit: limit}
+    const: {body.fetch_page_content: false}
+    out: {results: content, count: "len(content)"}
+    miss: "coalesce(content, []) == []"
+  octen.web.search:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.count: limit}
+    out: {results: data.results, count: "len(data.results)"}
+    miss: "coalesce(data.results, []) == []"
+  crawl4ai.web.search:
+    accepts: [[q]]
+    in: {q: queryParams.q}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
   firecrawl.web.search:
     accepts: [[q]]
     in: {q: body.query}
@@ -2828,6 +2985,39 @@ adapters:
     const: {body.includeMarkdown: true}
     out: {pages: "list(.)", count: "len(list(.))"}
     miss: "coalesce(text, '') == ''"
+  anyapi.web.scrape:
+    accepts: [[url]]
+    in: {url: body.url}
+    test_identity: {url: "https://example.com"}
+    const: {body.formats: [markdown], body.onlyMainContent: false}
+    out: {pages: "list(output.data)", count: "len(list(output.data))"}
+    miss: "coalesce(output.data.markdown, '') == ''"
+  crawl4ai.web.extract.structured:
+    accepts: [[url, schema, instruction], [url, schema], [url, instruction]]
+    in: {url: body.url, schema: body.schema, instruction: body.instruction}
+    out: {data: data}
+    miss: "data == null"
+  linkup.web.fetch.structured:
+    accepts: [[url, schema, instruction], [url, schema]]
+    in: {url: body.url, schema: body.schema}
+    in_expr: {body.instructions: instruction}
+    const: {body.mode: standard, body.renderJs: false}
+    out: {data: data}
+    miss: "data == null"
+  search1api.web.extract.structured:
+    accepts: [[url, schema, instruction], [url, schema]]
+    in: {url: body.url}
+    in_expr: {body.prompt: instruction, body.response_format: "obj('type', 'json_schema', 'json_schema', schema)"}
+    test_identity: {url: "https://example.com", instruction: "Extract the page title.",
+                    schema: {type: object, properties: {title: {type: string}}, required: [title]}}
+    out: {data: results}
+    miss: "results == null"
+  crawl4ai.web.scrape:
+    accepts: [[url]]
+    in: {url: body.url}
+    const: {body.format: md}
+    out: {pages: "list(.)", count: "len(list(.))"}
+    miss: "coalesce(markdown, '') == null"
   firecrawl.web.scrape:
     accepts: [[url]]
     in: {url: body.url}
@@ -2877,7 +3067,7 @@ adapters:
     accepts: [[url]]
     in_expr: {queryParams.domain: "host(url)"}
     test_identity: {url: "https://docs.context.dev"}
-    const: {queryParams.maxLinks: "10"}
+    in: {limit: queryParams.maxLinks}
     out: {results: urls, count: "len(urls)"}
     miss: "coalesce(urls, []) == []"
 

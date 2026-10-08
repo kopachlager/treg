@@ -11,6 +11,7 @@
     "predev": "vite build -c vite.agent-setup.config.ts && node scripts/copy-runtime.mjs"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "5.3.0",
     "@fontsource/dm-mono": "5.3.0",
     "@fontsource/geist-pixel": "5.3.0",
     "@lobehub/icons-static-svg": "1.95.1",

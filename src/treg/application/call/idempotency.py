@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError, TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from ...config import get_settings
 from ...infra.db import session_maker
 from ...domain.identity.access import Caller
 from ...models import AsyncTaskRecord, Hold, IdempotentCall, LedgerEntry
@@ -337,6 +338,21 @@ async def _claim_idempotent(key: str, fingerprint: str, rest: str, caller: Calle
     return True
 
 
+def _too_large_note(key: str, call_ref: str, charged_micro: int, size: int) -> tuple[bytes, int, str]:
+    """What a retry gets instead of an answer over the archive's size limit (`archive_max_body_bytes`).
+
+    The caller already received the full answer; only the retry copy is dropped. A 410, never a new
+    run: running the key again is the double charge this table prevents. Without the limit every
+    body was kept whole for 24 h, however large.
+    """
+    detail = {"error": "idempotency_response_too_large", "call_id": call_ref, "charged_micro": charged_micro,
+              "size_bytes": size,
+              "message": (f"the call with Idempotency-Key {_idem_display(key)!r} completed and was charged, "
+                          f"but its response ({size} bytes) is over treg's retry size limit, so it was "
+                          "not kept for replay. Send a new key to call again.")}
+    return json.dumps({"detail": detail}, separators=(",", ":")).encode(), 410, "application/json"
+
+
 async def _store_idempotent(key: str, caller: Caller, *, status_code: int, body: bytes,
                             media_type: str, charged_micro: int, metered: bool,
                             call_ref: str, terminal: bool = False) -> None:
@@ -357,6 +373,8 @@ async def _store_idempotent(key: str, caller: Caller, *, status_code: int, body:
     """
     keep = metered and (200 <= status_code < 300 or terminal)
     owned = (*_owned(caller.membership.id, key, call_ref), IdempotentCall.status == "pending")
+    if keep and len(body) > get_settings().archive_max_body_bytes:
+        body, status_code, media_type = _too_large_note(key, call_ref, charged_micro, len(body))
 
     async def _write() -> None:
         async with session_maker() as db:

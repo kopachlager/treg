@@ -168,6 +168,13 @@ async def test_ref_link_serves_the_landing_and_parks_the_code(c):
     assert r.cookies.get(referrals_cookie()) == "ann-ab3cd"
 
 
+async def test_ref_link_with_utm_tags_still_parks_the_code(c):
+    """Sponsor short links redirect to `/?ref=CODE&utm_source=…`; that once dropped the code."""
+    r = await c.get("/?ref=ann-ab3cd&utm_source=youtube&utm_medium=influencer&utm_campaign=x")
+    assert r.status_code == 200
+    assert r.cookies.get(referrals_cookie()) == "ann-ab3cd"
+
+
 async def test_junk_ref_is_dropped_not_stored(c):
     """The code reaches a database query, so it is validated on the way in AND on the way out."""
     r = await c.get("/?ref=" + "../../etc/passwd")

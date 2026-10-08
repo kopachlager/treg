@@ -236,6 +236,13 @@ def _serpstat_result_count(doc: object) -> int | None:
     return None
 
 
+def _spyfu_result_count(doc: object) -> int | None:
+    """Rows a SpyFu answer bills. Every endpoint answers `{"resultCount": N, "results": [...]}` and
+    SpyFu bills per row returned, so an empty list is free. Any other shape settles at the estimate."""
+    results = doc.get("results") if isinstance(doc, dict) else None
+    return len(results) if isinstance(results, list) else None
+
+
 def _rows_billed_micro(mk: MarketplaceCall, ep: dict | None, rows: int | None,
                        credits_per_row: Decimal | None = None) -> int | None:
     """What `rows` billed rows cost, never more than the hold. For a credit-priced row
@@ -386,7 +393,22 @@ _CREDIT_HEADERS = {
     "crustdata": ("x-credits-used", 1),
     "cloro": ("x-credits-charged", 1),
     "aiark": ("x-credit", -1),
+    "crawl4ai": ("x-c4-cost", 1),
 }
+
+
+def _usage_document(body: bytes):
+    """The document a `settle: usage` path reads: the JSON body, or, for an NDJSON stream, its LAST
+    line (a stream that closes with a summary line totalling the call)."""
+    try:
+        return json.loads(body)
+    except ValueError:
+        pass
+    last = next((ln for ln in reversed(body.splitlines()) if ln.strip()), b"")
+    try:
+        return json.loads(last) if last else None
+    except ValueError:
+        return None
 
 
 def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int | None:
@@ -545,6 +567,8 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
                                   Decimal("0.5") if company else None)
     if provider == "serpstat" and mk.cost_type == "per_result" and mk.unit_micro > 0:
         return _rows_billed_micro(mk, ep, _serpstat_result_count(doc))
+    if provider == "spyfu" and mk.cost_type == "per_result" and mk.unit_micro > 0:
+        return _rows_billed_micro(mk, ep, _spyfu_result_count(doc))
     if provider == "thecompaniesapi":
         # `simplified=true` returns a reduced record for zero credits on the endpoints that declare
         # it (catalog notes); otherwise the company search bills one credit per company RETURNED,
@@ -1147,10 +1171,7 @@ async def _platform_settle(
     # instead of the reported $0.0000157).
     terminal = None
     if billable and (mk.settlement_basis.get("amount") or {}).get("kind") == "usage" and body:
-        try:
-            terminal = json.loads(body)
-        except ValueError:
-            terminal = None
+        terminal = _usage_document(body)
     actual = ((0 if observed == 0 else settlement_basis.settle(
         mk.settlement_basis, {"observed_micro": observed, "terminal": terminal})) if billable else None)
     repeat_percent = get_settings().archive_hit_repeat_price_percent
@@ -1372,7 +1393,7 @@ async def _note_capacity_signal(mk: MarketplaceCall, status_code: int, headers, 
 
 async def _note_capacity_recovery(mk: MarketplaceCall) -> None:
     """After a tier-4 2xx: clear pending strikes on the endpoint and the provider, and the active
-    lock this call was admitted through as a probe. Reloads the view first (a no-op inside the
+    lock or sweep reading this call was admitted through as a probe. Reloads the view first (a no-op inside the
     TTL) so a strike written while this call was in flight is not missed. Never raises."""
     if mk.tier != "platform":
         return
@@ -1387,6 +1408,12 @@ async def _note_capacity_recovery(mk: MarketplaceCall) -> None:
                 if lock.is_active():
                     logging.getLogger("treg.capacity").warning(
                         "platform account recovered: %s (probe on %s)", lock.key, mk.endpoint_id)
+        if ((mk.probe_lock_id or "").startswith(capacity_marks.SWEEP_PROBE)
+                and await capacity_marks.clear_sweep_state(mk.provider, probe_id=mk.probe_lock_id)):
+            cleared = True
+            logging.getLogger("treg.capacity").warning(
+                "platform account recovered: %s (probe on %s lifted the sweep's reading)",
+                mk.provider, mk.endpoint_id)
         if cleared:
             capacity_view.invalidate()
     except asyncio.CancelledError:

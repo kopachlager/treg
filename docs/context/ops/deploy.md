@@ -94,9 +94,12 @@ for an `ALTER`. A deploy waits longer by retrying instead: `maintenance` re-runs
 head` up to `LOCK_RETRY_ATTEMPTS` times after a lock timeout, pausing a jittered few seconds between
 attempts so the table's short transactions can drain, and `env.py` commits each revision on its own
 (`transaction_per_migration`) so a retry resumes at the revision that timed out. Any other error
-fails the deploy at once. The one sanctioned exception to the 5 s cap is `CREATE INDEX CONCURRENTLY`
-in its own revision: its lock blocks nobody while it waits, so such a revision owns its longer
-timeouts and must detect and rebuild an invalid index left by interruption.
+fails the deploy at once. Concurrent index creation or removal may use longer bounded timeouts in
+its own revision: its lock permits ordinary reads and writes, although it conflicts with other
+maintenance. Such a revision restores the caller's timeouts and handles interruption: invalid builds
+must be rebuilt, and a partially completed removal must be retryable. Revision `0061` removes only
+ordinary indexes with verified unique-constraint replacements; its rollback recreates those indexes
+concurrently and requires enough disk space for them.
 
 Hot-table ALTERs stay cheap to retry when they sit in their own revision, add only nullable columns
 without defaults (metadata-only in PostgreSQL) and leave backfills and `NOT NULL` to later steps.
@@ -260,8 +263,9 @@ A feature flag set in the calling shell (`TREG_HUB_ENABLED=1 scripts/dev-local.s
 reach the server on its own: the script starts the server inside a tmux session, and a tmux session
 inherits the **tmux server's** environment, not the calling client's — the server would start and
 answer every hub route `404` with no error. `dev-local.sh` expands a fixed passthrough list
-(currently `TREG_HUB_ENABLED`) in its own process and bakes the value into the command string tmux
-runs; add a flag to that list to pass another one through. The script's own three env vars
+(the hub, table and onboarding flags) in its own process and bakes the value into the command string
+tmux runs; add a flag to that list to pass another one through. Keys never go through that list:
+they go in `scripts/.dev-home/dev-keys.env`, which the server sources. The script's own three env vars
 (`TREG_EMAIL_DEV_MODE`, `TREG_CONNECT_DEMO_ENABLED`, `TREG_DATABASE_URL`) are appended last so they
 always win over anything passed through.
 
@@ -362,7 +366,9 @@ without importing the heavy database stack into the light `treg` CLI.
 - `treg-worker arena insights` folds new audit rows into the rolling Arena aggregate
   (`--max-seconds`, default 110, bounds one pass; schedule it every two minutes).
   It requires the archive object-store settings when R2 reads are enabled, opens the same client
-  lifecycle as the web service, and flushes read analytics before exiting.
+  lifecycle as the web service, and flushes read analytics before exiting. The same scheduled
+  command refreshes Web Arena's saved Battle totals when Web Arena is enabled and its reviewed
+  benchmark is published; that full refresh is gated to once every 30 minutes.
 - `treg-worker catalog stats` folds new audit rows into per-endpoint, per-day reliability buckets
   (`--max-rows`, default 500,000, bounds one pass; schedule it every few minutes). The catalog keeps
   computing observations live until this command has caught up once, so it can be scheduled after
@@ -371,6 +377,11 @@ without importing the heavy database stack into the light `treg` CLI.
   with `TREG_JEV_TREG_TOKEN` (a member token of the demo team, so the spend is an ordinary bill) and jev
   through the Vercel AI Gateway (`TREG_AI_GATEWAY_API_KEY`), and stores the run under Ephemeral for the page.
   Both variables also belong on the web service, which needs them for the visitor judge endpoint.
+  The first-run onboarding (`TREG_ONBOARDING_V2`, or `TREG_ONBOARDING_V2_EMAILS` for a list, or
+  `TREG_ONBOARDING_V2_EXPERIMENT` for addresses on a domain of their own, in the PostHog experiment `onboarding-v2`) runs
+  on the web service and reads `TREG_ONBOARDING_TREG_TOKEN` (a member token of the team its setup
+  lookups bill), `TREG_ONBOARDING_GITHUB_TOKEN` and `TREG_AI_GATEWAY_API_KEY`; each is optional, and a
+  missing one skips its step.
 - `treg-worker admin purge-evidence` blanks failed-call evidence past the 14-day retention window
   (`--batch-size`, default 5000, rows per transaction; schedule it daily). `GET /admin/errors` is
   read-only and already withholds evidence past the window, so an unscheduled purge keeps the old

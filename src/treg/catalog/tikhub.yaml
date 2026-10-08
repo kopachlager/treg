@@ -36,13 +36,6 @@ endpoints:
     docs_url: https://docs.tikhub.io/
 
   - id: tikhub.tiktok.user.videos
-    # UNVERIFIED (2026-07-28): succeeded once, then failed 11 consecutive times with
-    #   HTTP 400 {"detail":{"code":400,"message":"Request failed. Please retry. …"}}
-    # across curl and httpx, with and without the optional params, spaced out to rule out the
-    # 10 req/s limit. The single success proves the path and params below are correct, so this is
-    # TikHub's upstream breaking, not a spec error. The app/v3 alternative
-    # (/api/v1/tiktok/app/v3/fetch_user_post_videos) answers HTTP 402 — it is not free-credit
-    # eligible — so there is no working route for this capability on the current account.
     capability: tiktok.user.videos
     platform: tiktok
     scope: any_account
@@ -60,6 +53,8 @@ endpoints:
     test_request:
       queryParams: {secUid: "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM", count: 5}
     cost: {type: per_success, value: 0.001, currency: USD, per: 1, unit: call, source: rate_card_api, source_url: 'https://api.tikhub.io/api/v1/tikhub/user/get_all_endpoints_info', checked: '2026-07-28', confidence: verified}
+    verified: 2026-10-04
+    example_response: examples/tikhub.tiktok.user.videos.json
     docs_url: https://docs.tikhub.io/
 
   - id: tikhub.tiktok.video.detail

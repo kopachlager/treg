@@ -9,7 +9,6 @@ limits: >-
   Firecrawl applies limits per team across API keys. treg smooths its shared key at
   the strictest 100 submissions/minute; BYOK uses its own team's limits.
 proposed_capabilities:
-  web.extract.batch: Scrape a bounded list of web pages
   web.extract.batch.status: Read a batch scrape's progress and results
 expect: {json_path: success, equals: true}
 
@@ -209,7 +208,7 @@ endpoints:
     method: POST
     path: /v2/batch/scrape
     body_allowlist: true
-    name: Scrape a batch of web pages
+    name: "Extract a batch of pages"
     summary: Start a bounded batch scrape of up to ten URLs.
     input:
       bodyType: json

@@ -166,8 +166,8 @@ balance/quota signal, or the capacity sweep) is refused **before any hold** with
 "alternatives": [...], "message"}}`, `X-Treg-Error: 1`, no `X-Treg-Cost-Micro`, `refused_by="capacity"`
 on the audit row. The caller's own key for the provider is never affected (tiers 1/2 win first), and
 treg does not call an alternative on the caller's behalf - it names them. A lock set by the call
-path lets one call a minute through as a probe and lifts on its 2xx, so the `message` says a retry
-in a minute may succeed; a lock from the sweep lasts until `resets_at`. Not the pool-saturation 503
+path or an exhausted reading from the sweep lets one call a minute through as a probe and lifts on
+its 2xx, so the `message` says a retry in a minute may succeed; otherwise it lasts until `resets_at`. Not the pool-saturation 503
 (`treg_saturated`), which is a different exit. See `architecture/proxy-model.md` § Platform capacity.
 
 ## `X-Treg-Served-Via` - this answer came through an overflow relay
@@ -496,7 +496,8 @@ validated before resolving the shared HTTP client. `/auth/logout` remains an HTT
   permanent keys; missing `tv` means zero. New scoped credentials do not change those compatibility
   rules. `POST /auth/revoke-tokens` bumps the version and
   returns a replacement cookie/token for the caller. `/auth/logout` is a same-origin cookie action.
-  Onboarding routes are `POST /onboard/demo|skip|reset`; see [onboarding](onboarding.md).
+  Onboarding routes are `POST /onboard/demo|skip|reset`, and behind `onboarding_v2`
+  `POST /onboarding/start` + `GET /onboarding` + `POST /onboarding/answer`; see [onboarding](onboarding.md).
 
   The shared dependencies resolve a membership token, a team Default key, a legacy identity bearer
   plus `X-Treg-Org`, or a session cookie plus `X-Treg-Org`. Bootstrap credentials cannot access team
@@ -517,7 +518,8 @@ validated before resolving the shared HTTP client. `/auth/logout` remains an HTT
   `sitetrack_js` (`GET /sitetrack.js`, no-cache) serves `web/sitetrack.js` with `{POSTHOG_KEY}` /
   `{POSTHOG_HOST}` templated from settings: the always-on first-party `treg_utm` first-touch cookie
   (utm_* + referring host, read by `_utm_attribution_from` / `_stamp_utm` in BOTH signup doors, `/users`
-  and `/orgs`) plus the PostHog bootstrap with pageviews ON. Loaded by every public page - landing,
+  and `/orgs`), the first-touch `treg_landing` path cookie (read by the first-run onboarding as
+  ranking evidence) plus the PostHog bootstrap with pageviews ON. Loaded by every public page - landing,
   use-case pages, resources, tutorial, and the SPA - so analytics sees the visitor's first hop rather
   than the post-OAuth `/app` landing. Without a key the analytics half is inert (empty string).
   `adtrack_js` (`GET /adtrack.js`, no-cache) serves the first-party ad-click capture script loaded by
@@ -948,8 +950,9 @@ the query itself (`referrer_user_id == caller.id`), never filtered afterwards, a
 
 **`/?ref=CODE` is the one query string the landing route serves.** `GET /` deliberately treats any
 query string as the SPA's and falls through to the dashboard - which for a referral link would send
-a stranger who has never heard of treg to an empty app shell instead of the pitch. So a *lone* `ref`
-counts as parameterless (anything alongside it still belongs to the SPA), and the code is parked in
+a stranger who has never heard of treg to an empty app shell instead of the pitch. So a `ref` alone
+or with only `utm_*` tags counts as parameterless (a sponsor's short link appends those, and the SPA
+never parks the code; anything else alongside it still belongs to the SPA), and the code is parked in
 `treg_ref` - httponly, lax, 30 days, and revalidated on read exactly like `_take_oauth_return`,
 because a cookie is attacker-supplied and this value reaches a query.
 

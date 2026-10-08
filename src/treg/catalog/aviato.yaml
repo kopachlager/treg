@@ -627,6 +627,8 @@ endpoints:
     docs_url: https://docs.data.aviato.co/api-reference/person/simple-search
 
   - id: aviato.linkedin.company.posts
+    status: retired
+    status_note: "Aviato discontinued its LinkedIn social routes: every call answers 410 Gone, 'This endpoint has been discontinued and is no longer available.' (live 2026-10-04)."
     domain: posts
     capability: linkedin.company.posts
     platform: linkedin
@@ -660,6 +662,8 @@ endpoints:
     docs_url: https://docs.data.aviato.co/api-reference/social/get-company-posts
 
   - id: aviato.linkedin.user.posts
+    status: retired
+    status_note: "Aviato discontinued its LinkedIn social routes: every call answers 410 Gone, 'This endpoint has been discontinued and is no longer available.' (live 2026-10-04)."
     domain: posts
     capability: linkedin.user.posts
     platform: linkedin
@@ -693,6 +697,8 @@ endpoints:
     docs_url: https://docs.data.aviato.co/api-reference/social/get-person-posts
 
   - id: aviato.linkedin.post.reactions
+    status: retired
+    status_note: "Aviato discontinued its LinkedIn social routes: every call answers 410 Gone, 'This endpoint has been discontinued and is no longer available.' (live 2026-10-04)."
     domain: engagement
     capability: linkedin.post.reactions
     platform: linkedin
@@ -726,6 +732,8 @@ endpoints:
     docs_url: https://docs.data.aviato.co/api-reference/social/get-post-reactions
 
   - id: aviato.linkedin.post.reposts
+    status: retired
+    status_note: "Aviato discontinued its LinkedIn social routes: every call answers 410 Gone, 'This endpoint has been discontinued and is no longer available.' (live 2026-10-04)."
     domain: engagement
     capability: linkedin.post.reposts
     platform: linkedin
@@ -759,6 +767,8 @@ endpoints:
     docs_url: https://docs.data.aviato.co/api-reference/social/get-post-reshares
 
   - id: aviato.linkedin.post.comments
+    status: retired
+    status_note: "Aviato discontinued its LinkedIn social routes: every call answers 410 Gone, 'This endpoint has been discontinued and is no longer available.' (live 2026-10-04)."
     domain: engagement
     capability: linkedin.post.comments
     platform: linkedin

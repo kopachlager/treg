@@ -111,8 +111,9 @@ Ready-made recipes your agent runs end to end, every call through treg:
 | [`treg`](skills/treg/SKILL.md) | Find and call any tool in the catalog, plus your own tools |
 | [`lead-signals`](skills/lead-signals/SKILL.md) | Find in-market buyers from public signals (complaints, job changes, hiring, funding, tool adoption) and monitor a topic, competitor or account list for them ([treg.to/leads-signals](https://treg.to/leads-signals)) |
 | [`make-ugc`](skills/make-ugc/SKILL.md) | Make AI UGC videos: trending hooks, a presenter, talking-head clips, captions ([treg.to/ugc](https://treg.to/ugc)) |
+| [`jev-memory`](skills/jev-memory/SKILL.md) | Give Claude Code a memory: a Claude Code mod where Jev judges each prompt after the turn and keeps your lasting preferences, installed ready-made or built from one prompt ([the mod](examples/claude-code-mods/jev-memory)) |
 
-`install.sh` installs all of them for you. To add them to an existing agent instead
+`install.sh` installs all of them for you except `jev-memory`, which is opt-in. To add them to an existing agent instead
 ([skills.sh](https://skills.sh) CLI):
 
 ```bash
@@ -176,6 +177,13 @@ vote for the best answer in one click, or watch a sequential waterfall. Capabili
 async providers participate too; Arena handles submit and polling internally. Browsing is
 public; submitting requires login, and billable attempts use your team's credits. See the
 [Arena guide](docs/context/interface/enrich-arena.md).
+
+**Web Arena** compares Web Search, Web Fetch, and Sitemap providers at `/web-arena`.
+Battle calls selected providers for the same input; Waterfall tries them in order. The
+live leaderboard combines direct provider-call hit rates and response times with checked
+Web Arena quality results over a rolling 30-day window. The pages open when the feature
+is enabled. See the
+[Web Arena guide](docs/context/interface/web-arena.md).
 
 ## Share & use your own tools
 

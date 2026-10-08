@@ -23,6 +23,7 @@ from starlette.routing import BaseRoute, Mount
 from . import adsconv, analytics, archive, audit
 from .application.call import route as routed_call
 from .application import arena, find_index
+from .application.onboard import first_run
 from . import bootstrap_handlers
 from .bootstrap_http import (
     _BodyDecodeMiddleware,
@@ -30,7 +31,7 @@ from .bootstrap_http import (
     _LegacyHostRedirectMiddleware,
     _SecurityHeadersMiddleware,
 )
-from .config import get_settings
+from .config import TREG_USER_AGENT, get_settings
 from .infra import kv
 from .infra.db import background_session_maker, verify_db
 from .infra.catalog_observations import (
@@ -47,6 +48,17 @@ RouteKey = tuple[str, tuple[str, ...], str]
 # key is placed here, so the dataplane cannot silently acquire a management or runner endpoint.
 _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/enrich-arena', ('GET',), 'enrich_arena_page'),
+    ('/web-arena', ('GET',), 'web_arena_page'),
+    ('/web-arena/leaderboard', ('GET',), 'web_arena_old_leaderboard'),
+    ('/web-arena/{asset}', ('GET',), 'web_arena_asset'),
+    ('/web-arena/api/tasks', ('GET',), 'web_arena_tasks'),
+    ('/web-arena/api/leaderboard', ('GET',), 'web_arena_leaderboard'),
+    ('/web-arena/api/quotes', ('POST',), 'web_arena_quote'),
+    ('/web-arena/api/runs/{run_id}/start', ('POST',), 'web_arena_start'),
+    ('/web-arena/api/runs', ('GET',), 'web_arena_history'),
+    ('/web-arena/api/runs/{run_id}', ('GET',), 'web_arena_run'),
+    ('/web-arena/api/runs/{run_id}/cancel', ('POST',), 'web_arena_cancel'),
+    ('/web-arena/api/runs/{run_id}/attempts/{attempt_id}/rating', ('POST',), 'web_arena_rating'),
     ('/enrich-arena/people-search-bench', ('GET',), 'enrich_arena_page'),
     ('/enrich-arena/leaderboard', ('GET',), 'enrich_arena_page'),
     ('/enrich-arena/{asset}', ('GET',), 'enrich_arena_asset'),
@@ -155,6 +167,7 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/skill.md', ('GET',), 'skill_md'),
     ('/skills/ugc/SKILL.md', ('GET',), 'make_ugc_skill_md'),
     ('/skills/lead-signals/SKILL.md', ('GET',), 'lead_signals_skill_md'),
+    ('/skills/jev-memory/SKILL.md', ('GET',), 'jev_memory_skill_md'),
     ('/feedback.md', ('GET',), 'feedback_md'),
     ('/favicon.ico', ('GET',), 'favicon'),
     ('/favicon.svg', ('GET',), 'favicon'),
@@ -214,6 +227,13 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/onboard/demo', ('POST',), 'onboard_demo'),
     ('/onboard/skip', ('POST',), 'onboard_skip'),
     ('/onboard/reset', ('POST',), 'onboard_reset'),
+    ('/onboarding/start', ('POST',), 'onboarding_start'),
+    ('/onboarding', ('GET',), 'onboarding_view'),
+    ('/onboarding/answer', ('POST',), 'onboarding_answer'),
+    ('/onboarding/preview', ('POST',), 'onboarding_preview_start'),
+    ('/onboarding/preview/{preview_id}', ('GET',), 'onboarding_preview_view'),
+    ('/onboarding/preview/{preview_id}/answer', ('POST',), 'onboarding_preview_answer'),
+    ('/onboarding/preview/{preview_id}/call', ('POST',), 'onboarding_preview_call'),
     ('/demo/sandbox', ('POST',), 'demo_sandbox_mint'),
     ('/demo/sandbox/live', ('GET',), 'demo_sandbox_live'),
     ('/stripe/webhook', ('POST',), 'stripe_webhook'),
@@ -327,6 +347,7 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/admin/hub/updates', ('GET',), 'admin_hub_updates'),
     ('/admin/hub/updates/{tool_id}', ('POST',), 'admin_hub_update_decide'),
     ('/admin/calls', ('GET',), 'admin_calls'),
+    ('/admin/share', ('GET',), 'admin_share'),
     ('/admin/errors', ('GET',), 'admin_errors'),
     ('/admin/health', ('GET',), 'admin_health'),
     ('/admin/kv', ('GET',), 'admin_kv'),
@@ -634,6 +655,8 @@ def _lifespan(role: AppRole):
             app.state.http = httpx.AsyncClient(
                 limits=limits,
                 timeout=httpx.Timeout(float(get_settings().call_timeout_s)),
+                # what a provider sees when no caller header says otherwise, never python-httpx/x
+                headers={"User-Agent": TREG_USER_AGENT},
             )
             ads_task = (
                 asyncio.create_task(adsconv.worker(background_session_maker, app.state.http))
@@ -689,6 +712,7 @@ def _lifespan(role: AppRole):
                         _mcp.clear_endpoint_observation_reader(endpoint_observations)
                     routed_call.clear_endpoint_observation_reader(endpoint_observations)
                     await arena.shutdown()
+                    await first_run.shutdown()
                     await endpoint_observations.aclose()
                     # analytics LAST: it is the sink the other two report their losses into, and a
                     # drop during their drain is the one most worth hearing about. Draining it first

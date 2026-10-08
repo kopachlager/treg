@@ -28616,7 +28616,7 @@ endpoints:
   platform: web
   method: GET
   path: /api/v1/hybrid/video_data
-  name: "Parse video details from a share URL (any platform)"
+  name: "Parse a shared video URL"
   summary: 'Hybrid: video data'
   cost:
     type: per_success

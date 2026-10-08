@@ -18,6 +18,7 @@ from sqlmodel import select
 
 from .. import audit, crypto, email as email_sender, ratestore
 from ..application.onboard import demo as demo_seed
+from ..application.onboard import first_run
 from ..infra import db as database
 from ..config import get_settings
 from ..domain.identity import session as sess
@@ -470,7 +471,8 @@ def start_google_login(cli: str, callback_base: Callable[[], str]) -> SocialLogi
     return SocialLoginStart(state=state, url=url)
 
 
-async def _provision_social_user(email: str, state: str, door: str, entry_surface: str = "") -> SocialLoginProof:
+async def _provision_social_user(email: str, state: str, door: str, entry_surface: str = "",
+                                 *, github_login: str = "", name: str = "") -> SocialLoginProof:
     created: set[int] = set()
     async with database.session_maker() as db:
         try:
@@ -485,6 +487,8 @@ async def _provision_social_user(email: str, state: str, door: str, entry_surfac
             raise SocialLoginError("suspended")
         await db.commit()
         signup.track_signup(user, created, door, entry_surface)
+        if user.id in created:  # what the door knew, for the first-run lookup (onboard.first_run)
+            await first_run.remember_hints(user.id, user.email, door=door, github_login=github_login, name=name)
         # Browser session OR `treg login` handshake — both go through the /login team picker now.
         return SocialLoginProof(user=user, cli_state=_cli_states.pop(state, None))
 
@@ -521,7 +525,8 @@ async def complete_github_login(
     except Exception as exc:  # noqa: BLE001
         print(f"[auth] github callback error: {exc}")  # keep internals server-side, not in the response
         raise SocialLoginError("callback_failed") from exc
-    return await _provision_social_user(email, state, "github", entry_surface)
+    login = prof.get("login") if isinstance(prof.get("login"), str) else ""
+    return await _provision_social_user(email, state, "github", entry_surface, github_login=login)
 
 
 async def complete_google_login(
@@ -558,7 +563,8 @@ async def complete_google_login(
     except Exception as exc:  # noqa: BLE001
         print(f"[auth] google callback error: {exc}")  # keep internals server-side, not in the response
         raise SocialLoginError("callback_failed") from exc
-    return await _provision_social_user(email, state, "google", entry_surface)
+    name = prof.get("name") if isinstance(prof.get("name"), str) else ""
+    return await _provision_social_user(email, state, "google", entry_surface, name=name)
 
 
 async def current_identity(x_treg_token: str, session_cookie: str) -> CurrentIdentity:

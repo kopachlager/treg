@@ -268,3 +268,66 @@ async def test_manual_grant_uses_configured_database_without_cloud_credentials(c
         credits = [entry for entry in entries if entry.meta.get("ref") == "maintenance-test"]
         assert len(credits) == 1
         assert credits[0].amount_micro == 1_250_000
+
+
+async def test_stats_count_calls_from_the_day_table_not_the_call_table(c):
+    """It loaded every call row to count them, which timed out at production size and answered
+    502. Windowed call numbers now come from `endpointdaystat`."""
+    from datetime import datetime, timedelta, timezone
+    from treg.infra.db import session_maker
+    from treg.models import EndpointDayStat
+
+    await _seed(c)
+    today = datetime.now(timezone.utc).date()
+    async with session_maker() as db:
+        for days_ago, n, ok in ((1, 100, 90), (10, 50, 40), (45, 1000, 0)):  # the last is outside 30 d
+            db.add(EndpointDayStat(endpoint_id="e.x", day=(today - timedelta(days=days_ago)).isoformat(),
+                                   n=n, ok=ok))
+        await db.commit()
+    calls = (await c.get("/admin/stats", headers=_a())).json()["calls"]
+    assert calls["last_7d"] == 100 and calls["last_30d"] == 150
+    assert calls["success_rate"] == round(130 / 150, 3)
+
+
+async def test_admin_calls_reads_new_rows_after_a_cursor_by_provider(c):
+    """A live poller reads only what is new: `since_id` returns rows after it oldest first, with
+    the provider, charge and timing; `provider` alone is refused so the read stays a key range."""
+    from treg.models import CallRecord
+    async with session_maker() as s:
+        for i, (prov, ok) in enumerate((("crawl4ai", 200), ("firecrawl", 200), ("crawl4ai", 502), ("crawl4ai", 200))):
+            s.add(CallRecord(org_id=1, user_email="u@example.com", tool_name=f"{prov}.web.scrape", method="POST",
+                             path="/call/x", status_code=ok, endpoint_id=f"{prov}.web.scrape", provider=prov,
+                             credential_tier="platform", cost_charged_micro=250 * (i + 1), duration_ms=100 + i,
+                             upstream_ms=90 + i, call_ref=f"ref{i}:r0",
+                             error_response='[502] {"ok": false, "reason": "no-answer:dns-failed"}' if ok == 502 else None))
+        await s.commit()
+    first = (await c.get("/admin/calls?limit=1", headers=_a())).json()
+    assert len(first) == 1 and first[0]["provider"] == "crawl4ai" and first[0]["charged_micro"] == 1000
+    cursor = first[0]["id"] - 4
+    rows = (await c.get(f"/admin/calls?since_id={cursor}&provider=crawl4ai", headers=_a())).json()
+    assert [r["status"] for r in rows] == [200, 502, 200]
+    assert [r["id"] for r in rows] == sorted(r["id"] for r in rows)
+    assert rows[0]["duration_ms"] == 100 and rows[0]["upstream_ms"] == 90 and rows[0]["tier"] == "platform"
+    assert [r["error_reason"] for r in rows] == [None, "no-answer:dns-failed", None]
+    assert (await c.get("/admin/calls?provider=crawl4ai", headers=_a())).status_code == 422
+
+
+async def test_admin_share_counts_requests_per_job_and_answers_per_provider(c):
+    """A routed call counts once as a request, and its successful attempt credits the provider that
+    answered; a direct call credits its own provider; a failed attempt credits nobody."""
+    from treg.models import CallRecord
+    async with session_maker() as s:
+        def add(ep, prov, status, ref):
+            s.add(CallRecord(org_id=1, user_email="u@example.com", tool_name=ep, method="POST", path="/call/x",
+                             status_code=status, endpoint_id=ep, provider=prov, call_ref=ref))
+        add("treg.web.extract", "treg", 200, "p1")
+        add("crawl4ai.web.scrape", "crawl4ai", 502, "p1:r0")
+        add("tinyfish.web.fetch", "tinyfish", 200, "p1:r1")
+        add("treg.web.extract", "treg", 200, "p2")
+        add("crawl4ai.web.scrape", "crawl4ai", 200, "p2:r0")
+        add("crawl4ai.web.scrape", "crawl4ai", 200, "d1")
+        await s.commit()
+    body = (await c.get("/admin/share?minutes=60", headers=_a())).json()
+    job = next(j for j in body["jobs"] if j["capability"] == "web.extract")
+    assert job["requests"] == 3 and job["answered"] == 3
+    assert job["by_provider"] == {"crawl4ai": 2, "tinyfish": 1}

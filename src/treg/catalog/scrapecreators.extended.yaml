@@ -15,7 +15,7 @@
 # 2026-07-28: platform slugs added to capabilities.yaml and endpoints re-filed off `web`:
 # apple-music, bluesky, github, kick, pinterest, rumble, snapchat, soundcloud, spotify,
 # truthsocial, twitch, plus komi/linkbio/linkme/linktree/pillar under `linkinbio`.
-# Only detect-age-gender (image detection, no platform) remains on `web`.
+# Creator photo age and gender estimation files under the creators platform.
 
 provider: scrapecreators
 source:
@@ -362,10 +362,11 @@ endpoints:
 - id: scrapecreators.x.v1-detect-age-gender
   kind: utility
   tier: extended
-  platform: web
+  capability: creators.photo.demographics
+  platform: creators
   method: GET
   path: /v1/detect-age-gender
-  name: "Estimate age and gender from a profile photo URL"
+  name: "Estimate age and gender"
   summary: Uses AI to analyze a creator's profile photo and estimate their age and gender.
   cost:
     type: per_call

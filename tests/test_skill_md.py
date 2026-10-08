@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 
 async def test_skill_md_served_and_templated(clients):
     r = await clients.get("/skill.md")
@@ -60,3 +63,21 @@ async def test_lead_signals_skill_is_served_and_advertised(clients):
     assert wk.text == r.text
     idx = (await clients.get("/.well-known/skills/index.json")).json()["skills"][2]
     assert f"description: {idx['description']}" in r.text
+
+
+async def test_jev_memory_skill_is_served_but_opt_in(clients):
+    """The Claude Code memory mod as a skill, served by URL but kept out of the index, so install.sh
+    never installs it unasked. It points at the mod in the repo, so that folder has to exist where
+    the skill says it is."""
+    r = await clients.get("/skills/jev-memory/SKILL.md")
+    assert r.status_code == 200 and r.text.startswith("---\nname: jev-memory")
+    assert "{BASE}" not in r.text
+    idx = (await clients.get("/.well-known/skills/index.json")).json()["skills"]
+    assert "jev-memory" not in [s["name"] for s in idx]
+    repo = Path(__file__).resolve().parent.parent
+    mod = repo / "examples" / "claude-code-mods"
+    assert "examples/claude-code-mods/jev-memory" in r.text
+    assert (mod / "jev-memory" / ".claude-plugin" / "plugin.json").is_file()
+    market = json.loads((mod / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    assert f"jev-memory@{market['name']}" in r.text
+    assert [p["source"] for p in market["plugins"]] == ["./jev-memory"]

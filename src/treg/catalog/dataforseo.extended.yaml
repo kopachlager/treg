@@ -10033,7 +10033,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/bulk_backlinks/live
-  name: "Backlink counts for many domains or pages"
+  name: "Bulk backlink counts"
   summary: This endpoint will provide you with the number of backlinks pointing to domains, subdomains, and pages specified in the targets array.
   input:
     bodyType: json
@@ -10083,7 +10083,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/bulk_new_lost_backlinks/live
-  name: "New and lost backlink counts for many domains"
+  name: "Bulk backlink changes"
   summary: This endpoint will provide you with the number of new and lost backlinks for the domains, subdomains, and pages specified in the targets array.
   input:
     bodyType: json
@@ -10149,7 +10149,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/bulk_new_lost_referring_domains/live
-  name: "New and lost referring domain counts for many domains"
+  name: "Bulk referring-domain changes"
   summary: This endpoint will provide you with the number of referring domains pointing to the domains, subdomains and pages specified in the targets array.
   input:
     bodyType: json
@@ -10215,7 +10215,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/bulk_pages_summary/live
-  name: "Backlink summary for up to 1000 pages or domains"
+  name: "Bulk backlink summaries"
   summary: This endpoint will provide you with a comprehensive overview of backlinks and related data for a bulk of up to 1000 pages, domains, or subdomains.
   input:
     bodyType: json
@@ -10257,7 +10257,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/bulk_referring_domains/live
-  name: "Referring domain counts for many domains or pages"
+  name: "Bulk referring-domain counts"
   summary: This endpoint will provide you with the number of referring domains pointing to domains, subdomains, and pages specified in the targets array.
   docs_url: https://docs.dataforseo.com/v3/backlinks/bulk_referring_domains/live/
   input:
@@ -10308,7 +10308,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/bulk_spam_score/live
-  name: "Spam scores for many domains or pages"
+  name: "Bulk backlink spam scores"
   summary: This endpoint will provide you with spam scores of the domains, subdomains, and pages you specified in the targets array.
   docs_url: https://docs.dataforseo.com/v3/backlinks/bulk_spam_score/live/
   input:
@@ -10359,7 +10359,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/domain_intersection/live
-  name: "Domains linking to several targets at once"
+  name: "Shared referring domains"
   summary: This endpoint will provide you with the list of domains pointing to the specified websites.
   input:
     bodyType: json
@@ -10459,7 +10459,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/domain_pages/live
-  name: "Pages of a domain with backlinks per page"
+  name: "Pages with backlinks"
   summary: This endpoint will provide you with a detailed overview of domain pages with backlink data for each page.
   docs_url: https://docs.dataforseo.com/v3/backlinks/domain_pages/live/
   input:
@@ -10548,7 +10548,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/domain_pages_summary/live
-  name: "Backlink summary for every page of a domain"
+  name: "Page backlink summaries"
   summary: This endpoint will provide you with detailed summary data on all backlinks and related metrics for each page of the target domain or subdomain you specify.
   docs_url: https://docs.dataforseo.com/v3/backlinks/domain_pages_summary/live/
   input:
@@ -10629,7 +10629,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/history/live
-  name: "Backlink history for a domain back to 2019"
+  name: "Backlink history"
   summary: This endpoint will provide you with historical backlinks data back to the beginning of 2019.
   input:
     bodyType: json
@@ -10677,7 +10677,7 @@ endpoints:
   method: GET
   path: /backlinks/index
   cost: {type: free, value: 0, currency: USD, unit: call, source: observed, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Backlink index totals — backlinks, domains, pages"
+  name: "Backlink index totals"
   summary: This endpoint will provide you with the total number of backlinks, domains, and pages our database contains for the moment when you make a request.
   untestable: the OpenAPI spec ships no example request body for this route, so no test request could be generated
 - id: dataforseo.x.backlinks-page-intersection-live
@@ -10685,7 +10685,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/page_intersection/live
-  name: "Pages linking to several targets at once"
+  name: "Shared referring pages"
   summary: This endpoint will provide you with the list of referring pages pointing to the specified targets.
   docs_url: https://docs.dataforseo.com/v3/backlinks/page_intersection/live/
   input:
@@ -10794,7 +10794,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/referring_networks/live
-  name: "Referring IPs and subnets for a domain or page"
+  name: "Referring IPs and networks"
   summary: This endpoint will provide you with a detailed overview of referring IPs and subnets pointing to the target you specify.
   docs_url: https://docs.dataforseo.com/v3/backlinks/referring_networks/live/
   input:
@@ -10899,7 +10899,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/timeseries_new_lost_summary/live
-  name: "New and lost backlinks over time for a domain"
+  name: "Backlink changes over time"
   summary: This endpoint will provide you with the number of new and lost backlinks and referring domains for the domain specified in the target field.
   docs_url: https://docs.dataforseo.com/v3/backlinks/timeseries_new_lost_summary/live/
   input:
@@ -10952,7 +10952,7 @@ endpoints:
   platform: web
   method: POST
   path: /backlinks/timeseries_summary/live
-  name: "Backlink totals over time for a domain, by date range"
+  name: "Backlink totals by date"
   summary: This endpoint will provide you with an overview of backlink data for the target domain available during a period between the two indicated dates.
   docs_url: https://docs.dataforseo.com/v3/backlinks/timeseries_summary/live/
   input:
@@ -11009,7 +11009,7 @@ endpoints:
   platform: web
   method: POST
   path: /business_data/business_listings/categories_aggregation/live
-  name: "Business listing counts by related category"
+  name: "Business listings by category"
   summary: Business Listings Categories Aggregation endpoint provides results containing information about groups of related categories along with the number of entities in each category.
   input:
     bodyType: json
@@ -11091,7 +11091,7 @@ endpoints:
   platform: web
   method: POST
   path: /business_data/business_listings/search/live
-  name: "Search Google Maps businesses by category and location"
+  name: "Search Google Maps businesses"
   summary: Business Listings Search API provides results containing information about business entities listed on Google Maps in the specified categories.
   input:
     bodyType: json
@@ -11220,7 +11220,7 @@ endpoints:
   platform: web
   method: POST
   path: /content_analysis/category_trends/live
-  name: "Citation trends for a category over a date range"
+  name: "Citation trends by category"
   summary: This endpoint will provide you with data on all citations in the target category for the indicated date range.
   docs_url: https://docs.dataforseo.com/v3/content_analysis/category_trends/live/
   input:
@@ -11289,7 +11289,7 @@ endpoints:
   platform: web
   method: POST
   path: /content_analysis/phrase_trends/live
-  name: "Citation trends for a keyword over a date range"
+  name: "Citation trends by keyword"
   summary: This endpoint will provide you with data on all citations of the target keyword for the indicated date range.
   docs_url: https://docs.dataforseo.com/v3/content_analysis/phrase_trends/live/
   input:
@@ -11362,7 +11362,7 @@ endpoints:
   platform: web
   method: POST
   path: /content_analysis/rating_distribution/live
-  name: "Rating distribution of citations for a keyword"
+  name: "Citation ratings by keyword"
   summary: This endpoint will provide you with rating distribution data for the keyword and other parameters specified in the request.
   docs_url: https://docs.dataforseo.com/v3/content_analysis/rating_distribution/live/
   input:
@@ -11429,7 +11429,7 @@ endpoints:
   platform: web
   method: POST
   path: /content_analysis/search/live
-  name: "Search citations of a keyword"
+  name: "Search keyword citations"
   summary: This endpoint will provide you with detailed citation data available for the target keyword.
   docs_url: https://docs.dataforseo.com/v3/content_analysis/search/live/
   input:
@@ -11528,7 +11528,7 @@ endpoints:
   platform: web
   method: POST
   path: /content_analysis/sentiment_analysis/live
-  name: "Sentiment of citations for a keyword"
+  name: "Citation sentiment by keyword"
   summary: This endpoint will provide you with sentiment analysis data for the citations available for the target keyword.
   docs_url: https://docs.dataforseo.com/v3/content_analysis/sentiment_analysis/live/
   input:
@@ -11589,7 +11589,7 @@ endpoints:
   platform: web
   method: POST
   path: /content_analysis/summary/live
-  name: "Citation overview for a keyword"
+  name: "Keyword citation overview"
   summary: This endpoint will provide you with an overview of citation data available for the target keyword.
   docs_url: https://docs.dataforseo.com/v3/content_analysis/summary/live/
   input:
@@ -11664,7 +11664,7 @@ endpoints:
   platform: web
   method: POST
   path: /domain_analytics/technologies/aggregation_technologies/live
-  name: "Technologies used alongside a given technology"
+  name: "Related website technologies"
   summary: The Aggregation Technologies endpoint will provide you with a list of the most popular technologies websites use alongside the technologies you specify.
   docs_url: https://docs.dataforseo.com/v3/domain_analytics/technologies/aggregation_technologies/live/
   input:
@@ -11769,7 +11769,7 @@ endpoints:
   platform: web
   method: POST
   path: /domain_analytics/technologies/domain_technologies/live
-  name: "Technologies a website uses, by domain"
+  name: "Website technologies"
   summary: Using this endpoint you will get a list of technologies used in a particular domain.
   docs_url: https://docs.dataforseo.com/v3/domain_analytics/technologies/domain_technologies/live/
   input:
@@ -11796,7 +11796,7 @@ endpoints:
   platform: web
   method: POST
   path: /domain_analytics/technologies/domains_by_html_terms/live
-  name: "Find domains by HTML terms on their homepage"
+  name: "Find domains by HTML terms"
   summary: This endpoint provides domains based on the HTML terms they use on their homepage.
   docs_url: https://docs.dataforseo.com/v3/domain_analytics/technologies/domains_by_html_terms/live/
   input:
@@ -11861,7 +11861,7 @@ endpoints:
   platform: web
   method: POST
   path: /domain_analytics/technologies/domains_by_technology/live
-  name: "Find domains using a given technology"
+  name: "Find domains by technology"
   summary: This endpoint provides domains based on the technology they use.
   docs_url: https://docs.dataforseo.com/v3/domain_analytics/technologies/domains_by_technology/live/
   input:
@@ -11964,7 +11964,7 @@ endpoints:
   method: GET
   path: /domain_analytics/technologies/technologies
   cost: {type: free, value: 0, currency: USD, unit: call, source: observed, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Full list of technologies by group and category"
+  name: "Website technology list"
   summary: This endpoint will provide you with the full list of available technologies structured by technology groups and categories each particular technology belongs to.
   docs_url: https://docs.dataforseo.com/v3/domain_analytics/technologies/technologies/
   untestable: the OpenAPI spec ships no example request body for this route, so no test request could be generated
@@ -11973,7 +11973,7 @@ endpoints:
   platform: web
   method: POST
   path: /domain_analytics/technologies/technologies_summary/live
-  name: "Domain counts for a technology, by country and language"
+  name: "Technology counts by region"
   summary: The Technologies Summary endpoint will provide you with the number of domains across different countries and languages that use the specified technology names, technology groups, or technology categories.
   docs_url: https://docs.dataforseo.com/v3/domain_analytics/technologies/technologies_summary/live/
   input:
@@ -12056,7 +12056,7 @@ endpoints:
   platform: web
   method: POST
   path: /domain_analytics/technologies/technology_stats/live
-  name: "Domain counts for a technology over time"
+  name: "Technology domain counts over time"
   summary: The Technology Stats endpoint will provide you with historical data on the number of domains across different countries and languages that use the specified technology.
   docs_url: https://docs.dataforseo.com/v3/domain_analytics/technologies/technology_stats/live/
   input:
@@ -12099,7 +12099,7 @@ endpoints:
   platform: web
   method: POST
   path: /domain_analytics/whois/overview/live
-  name: "Whois records with backlink and traffic stats, filtered"
+  name: "Whois and site metrics"
   summary: This endpoint will provide you with Whois data enriched with backlink stats, and ranking and traffic info from organic and paid search results.
   input:
     bodyType: json
@@ -12155,7 +12155,7 @@ endpoints:
   platform: web
   method: POST
   path: /keywords_data/clickstream_data/bulk_search_volume/live
-  name: "Clickstream search volume for up to 1000 keywords"
+  name: "Bulk clickstream volume"
   summary: The Bulk Clickstream Search Volume endpoint of DataForSEO Keywords Data API is designed to provide clickstream-based search volume data for up to 1000 keywords in a single Live request.
   docs_url: https://docs.dataforseo.com/v3/keywords_data/clickstream_data/bulk_search_volume/live/
   input:
@@ -12204,7 +12204,7 @@ endpoints:
   platform: web
   method: POST
   path: /keywords_data/clickstream_data/dataforseo_search_volume/live
-  name: "Search volume for keywords, clickstream optional"
+  name: "Keyword search volume"
   summary: ClickstreamDataDataforseoSearchVolumeLive
   docs_url: https://docs.dataforseo.com/v3/keywords_data/clickstream_data/dataforseo_search_volume/live/
   input:
@@ -12267,7 +12267,7 @@ endpoints:
   platform: web
   method: POST
   path: /keywords_data/clickstream_data/global_search_volume/live
-  name: "Global clickstream search volume for up to 1000 keywords"
+  name: "Global clickstream volume"
   summary: The Clickstream Global Search Volume endpoint of DataForSEO Keywords Data API is designed to provide clickstream-based search volume data for up to 1000 keywords in a single Live request.
   docs_url: https://docs.dataforseo.com/v3/keywords_data/clickstream_data/global_search_volume/live/
   input:
@@ -12306,7 +12306,7 @@ endpoints:
   platform: web
   method: POST
   path: /keywords_data/dataforseo_trends/demography/live
-  name: "Keyword popularity by age and gender, DataForSEO Trends"
+  name: "Keyword trends by age and gender"
   summary: This endpoint will provide you with the demographic breakdown (by age and gender) of keyword popularity per each specified term based on DataForSEO Trends data.
   docs_url: https://docs.dataforseo.com/v3/keywords_data/dataforseo_trends/demography/live/
   input:
@@ -12437,7 +12437,7 @@ endpoints:
   method: GET
   path: /keywords_data/dataforseo_trends/locations/{country}
   cost: {type: free, value: 0, currency: USD, unit: call, source: observed, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "DataForSEO Trends location codes by country"
+  name: "Keyword trend location codes"
   summary: You will receive the list of DataForSEO Trends locations by calling this API.
   docs_url: https://docs.dataforseo.com/v3/keywords_data/dataforseo_trends/locations/
   untestable: the OpenAPI spec ships no example request body for this route, so no test request could be generated
@@ -12446,7 +12446,7 @@ endpoints:
   platform: web
   method: POST
   path: /keywords_data/dataforseo_trends/merged_data/live
-  name: "Keyword popularity merged across trend sources"
+  name: "Combined keyword trends"
   summary: This endpoint will provide you with the keyword popularity data from DataForSEO Trends.
   docs_url: https://docs.dataforseo.com/v3/keywords_data/dataforseo_trends/merged_data/live/
   input:
@@ -12513,7 +12513,7 @@ endpoints:
   platform: web
   method: POST
   path: /keywords_data/dataforseo_trends/subregion_interests/live
-  name: "Keyword popularity by subregion, DataForSEO Trends"
+  name: "Keyword trends by region"
   summary: This endpoint will provide you with location-specific keyword popularity data from DataForSEO Trends.
   docs_url: https://docs.dataforseo.com/v3/keywords_data/dataforseo_trends/subregion_interests/live/
   input:
@@ -12581,7 +12581,7 @@ endpoints:
   platform: web
   method: POST
   path: /on_page/content_parsing
-  name: "Parsed page content from a crawl, by task id and URL"
+  name: "Parse crawled page content"
   summary: This endpoint allows parsing the content on any page you specify and will return the structured content of the target page, including link URLs, anchors, headings, and textual content.
   docs_url: https://docs.dataforseo.com/v3/on_page/content_parsing/
   input:
@@ -12618,7 +12618,7 @@ endpoints:
   platform: web
   method: POST
   path: /on_page/content_parsing/live
-  name: "Parse a page into links, headings and text, live"
+  name: "Parse live page content"
   summary: This endpoint allows parsing the content on any page you specify and will return the structured content of the target page, including link URLs, anchors, headings, and textual content.
   docs_url: https://docs.dataforseo.com/v3/on_page/content_parsing/live/
   input:
@@ -12694,7 +12694,7 @@ endpoints:
   method: POST
   path: /on_page/duplicate_content
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Pages with duplicate content in a crawl, by URL"
+  name: "Duplicate page content"
   summary: This endpoint returns a list of pages that have content similar to the page specified in the request.
   docs_url: https://docs.dataforseo.com/v3/on_page/duplicate_content/
   input:
@@ -12735,7 +12735,7 @@ endpoints:
   method: POST
   path: /on_page/duplicate_tags
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Pages with duplicate title or meta tags in a crawl"
+  name: "Duplicate title or meta tags"
   summary: This endpoint returns a list of pages that contain duplicate title or description tags.
   docs_url: https://docs.dataforseo.com/v3/on_page/duplicate_tags/
   input:
@@ -12777,7 +12777,7 @@ endpoints:
   method: POST
   path: /on_page/keyword_density
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Keyword density on a crawled site or page"
+  name: "Page keyword density"
   summary: This endpoint will provide you with keyword density and keyword frequency data for terms appearing on the specified website or web page.
   docs_url: https://docs.dataforseo.com/v3/on_page/keyword_density/
   input:
@@ -12827,7 +12827,7 @@ endpoints:
   method: GET
   path: /on_page/lighthouse/audits
   cost: {type: free, value: 0, currency: USD, unit: call, source: observed, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Available Lighthouse audit checks"
+  name: "Available Lighthouse checks"
   summary: The OnPage Lighthouse API is based on Google’s open-source Lighthouse project and provides data on the quality of web pages.
   docs_url: https://docs.dataforseo.com/v3/on_page/lighthouse/audits/
   untestable: the OpenAPI spec ships no example request body for this route, so no test request could be generated
@@ -12836,7 +12836,7 @@ endpoints:
   platform: web
   method: POST
   path: /on_page/lighthouse/live/json
-  name: "Lighthouse audit for a URL, live"
+  name: "Lighthouse page audit"
   summary: The OnPage Lighthouse API is based on Google’s open-source Lighthouse project for measuring the quality of web pages and web apps.
   input:
     bodyType: json
@@ -12913,7 +12913,7 @@ endpoints:
   method: POST
   path: /on_page/links
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Internal and external links from a site crawl"
+  name: "Crawl links"
   summary: This endpoint will provide you with a list of internal and external links detected on a target website.
   docs_url: https://docs.dataforseo.com/v3/on_page/links/
   input:
@@ -12969,7 +12969,7 @@ endpoints:
   platform: web
   method: POST
   path: /on_page/microdata
-  name: "Validate JSON-LD and microdata on a crawled page"
+  name: "Validate page structured data"
   summary: This endpoint is designed to validate structured JSON-LD data and Microdata.
   docs_url: https://docs.dataforseo.com/v3/on_page/microdata/
   input:
@@ -12998,7 +12998,7 @@ endpoints:
   method: POST
   path: /on_page/non_indexable
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Non-indexable pages found in a site crawl"
+  name: "Non-indexable pages"
   summary: This endpoint returns a list of pages that are blocked from being indexed by Google and other search engines through robots.txt, HTTP headers, or meta tags settings.
   docs_url: https://docs.dataforseo.com/v3/on_page/non_indexable/
   input:
@@ -13033,6 +13033,7 @@ endpoints:
     note: the POST body is an ARRAY of task objects with these fields — one object per task
   untestable: needs the id of a completed on_page crawl (task_post plus polling); the one-shot route of this family is verified via dataforseo.x.on-page-instant-pages
 - id: dataforseo.x.on-page-page-screenshot
+  capability: web.screenshot
   tier: extended
   platform: web
   method: POST
@@ -13098,7 +13099,7 @@ endpoints:
   method: POST
   path: /on_page/pages
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Crawled pages with on-page checks, by task id"
+  name: "Crawled page checks"
   summary: This endpoint returns a list of crawled pages with on-page check-ups and other metrics related to the page performance.
   docs_url: https://docs.dataforseo.com/v3/on_page/pages/
   input:
@@ -13153,7 +13154,7 @@ endpoints:
   method: POST
   path: /on_page/pages_by_resource
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Pages using a given resource, from a site crawl"
+  name: "Pages using a resource"
   summary: This endpoint will return the list of pages where a specific resource is located.
   docs_url: https://docs.dataforseo.com/v3/on_page/page_by_resource/
   input:
@@ -13198,7 +13199,7 @@ endpoints:
   method: POST
   path: /on_page/raw_html
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Raw HTML of a crawled page, by task id and URL"
+  name: "Crawled page HTML"
   summary: This endpoint returns the HTML of a page you indicate in the request.
   docs_url: https://docs.dataforseo.com/v3/on_page/raw_html/
   input:
@@ -13223,7 +13224,7 @@ endpoints:
   method: POST
   path: /on_page/redirect_chains
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Redirect chains found in a site crawl"
+  name: "Redirect chains"
   summary: Redirect chains occur when there are at least two redirects between the initial URL and the destination URL.
   docs_url: https://docs.dataforseo.com/v3/on_page/redirect_chains/
   input:
@@ -13264,7 +13265,7 @@ endpoints:
   method: POST
   path: /on_page/resources
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Site resources from a crawl — images, scripts, broken"
+  name: "Crawl resources"
   summary: This endpoint will provide you with a list of resources, including images, scripts, stylesheets, and broken elements.
   docs_url: https://docs.dataforseo.com/v3/on_page/resources/
   input:
@@ -13327,7 +13328,7 @@ endpoints:
   method: GET
   path: /on_page/summary/{id}
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Site crawl summary and issues, by task id"
+  name: "Site audit summary"
   summary: Using this function, you can get the overall information on a website as well as drill down into exact on-page issues of a website that has been scanned.
   docs_url: https://docs.dataforseo.com/v3/on_page/summary/
   untestable: the OpenAPI spec ships no example request body for this route, so no test request could be generated
@@ -13336,7 +13337,7 @@ endpoints:
   platform: web
   method: POST
   path: /on_page/task_post
-  name: "Start a site crawl for on-page audit, by domain"
+  name: "Start a site audit crawl"
   summary: OnPage API checks websites for 60+ customizable on-page parameters defines and displays all found flaws and opportunities for optimization so that you can easily fix them.
   docs_url: https://docs.dataforseo.com/v3/on_page/task_post/
   input:
@@ -13545,7 +13546,7 @@ endpoints:
   method: POST
   path: /on_page/uncrawlable_resources
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Uncrawlable resources found in a site crawl"
+  name: "Uncrawlable resources"
   summary: This endpoint returns a list of resources detected on the target website that could not be crawled due to a content type inconsistency.
   input:
     bodyType: json
@@ -13589,7 +13590,7 @@ endpoints:
   method: POST
   path: /on_page/waterfall
   cost: {type: free, value: 0, currency: USD, unit: call, source: rate_card_api, source_url: 'https://api.dataforseo.com/v3/appendix/user_data', checked: '2026-08-07', note: 'DataForSEO reports cost 0 for this route on our own account — reference/utility data, not metered'}
-  name: "Page load waterfall timings for a crawled page"
+  name: "Page load waterfall"
   summary: This endpoint is designed to provide you with the page speed insights.
   docs_url: https://docs.dataforseo.com/v3/on_page/waterfall/
   input:

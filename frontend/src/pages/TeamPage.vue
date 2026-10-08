@@ -329,7 +329,7 @@ export default {
                         <span v-if="billing.card_on_file" class="sub" style="margin-left:auto">Card on file ✓</span>
                       </label>
                       <p class="sub" style="margin:8px 0 0">
-                        <template v-if="billing.autotopup.enabled">On - we add {{money(billing.autotopup.amount_micro)}} whenever the balance drops below {{money(billing.autotopup.threshold_micro)}}. This month: {{money(billing.autotopup.month_spend_micro)}}.
+                        <template v-if="billing.autotopup.enabled">On - we add {{money(billing.autotopup.amount_micro)}} whenever the balance drops below {{money(billing.autotopup.threshold_micro)}}, up to {{billing.autotopup.per_hour}} times per hour. This month: {{money(billing.autotopup.month_spend_micro)}}.
                           <a href="#" @click.prevent="autoOpen=!autoOpen;autoConsent=false">{{autoOpen?'Cancel':'Edit'}}</a></template>
                         <template v-else>Keep agents running without watching the balance. We charge your saved card only when it dips below your threshold.</template>
                       </p>
@@ -341,12 +341,15 @@ export default {
                           <input class="msel" style="width:70px" type="number" min="5" v-model.number="autoAmount"/>
                           <span class="sub" style="margin:0">when the balance drops below $</span>
                           <input class="msel" style="width:70px" type="number" min="5" v-model.number="autoThreshold"/>
+                          <span class="sub" style="margin:0">, up to</span>
+                          <input class="msel" style="width:56px" type="number" min="1" max="60" v-model.number="autoPerHour"/>
+                          <span class="sub" style="margin:0">times per hour</span>
                         </div>
                         <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer">
                           <input type="checkbox" v-model="autoConsent" style="margin-top:3px"/>
                           <!-- The mandate text. Not decoration: an off-session charge with no recorded
                                agreement to THESE numbers is an unauthorized charge under PSD2/SCA. -->
-                          <span class="sub" style="margin:0">I authorize treg to charge my saved card ${{autoAmount}} automatically whenever my balance drops below ${{autoThreshold}}. Cancel any time.</span>
+                          <span class="sub" style="margin:0">I authorize treg to charge my saved card ${{autoAmount}} automatically whenever my balance drops below ${{autoThreshold}}, up to {{autoPerHour}} times per hour. Cancel any time.</span>
                         </label>
                         <div style="margin-top:12px">
                           <button class="btn primary" :disabled="!autoConsent||billingBusy" @click="setAuto(true)">{{billingBusy?'…':(billing.autotopup.enabled?'Save':'Turn on auto top-up')}}</button>

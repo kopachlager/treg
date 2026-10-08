@@ -137,6 +137,17 @@ async def test_an_abstaining_judge_serves_the_keyword_page(clients, monkeypatch)
     assert all(row["p"] is None for row in judged["rows"])
 
 
+async def test_provider_display_name_and_old_slug_find_the_same_tools(clients, monkeypatch):
+    _on(monkeypatch, find_engine="v1")
+    for judge in (_fake_judge({}), _abstain):
+        monkeypatch.setattr(judge_infra, "judge", judge)
+        for query in ("context", "context.de", "context.dev", "brand.de", "brand.dev"):
+            _, events = await _find(clients, query)
+            result = events[1]
+            assert result["verdict"] == "name" and result["named"] == "provider"
+            assert result["rows"] and {row["provider"] for row in result["rows"]} == {"branddev"}
+
+
 async def test_refuses_empty_unconfigured_and_over_the_limit(clients, monkeypatch):
     r, _ = await _find(clients, "   ")
     assert r.status_code == 400
@@ -317,6 +328,17 @@ def test_v2_name_pages():
     assert F.name_page(fr.name_of("tiktok", ix), cat)[0]["platform"] == "tiktok"
     assert {e["provider"] for e in F.name_page(fr.name_of("hunter", ix), cat)} == {"hunter"}
     assert {e["id"] for e in F.name_page(fr.name_of("flux", ix), cat)} == {"replicate.flux.schnell", "falco.flux.pro"}
+
+
+def test_v2_provider_name_survives_judge_abstention():
+    cat = catalog_store.load()
+    ix = fr.index(cat)
+    display = lambda service: "Context.dev" if service == "branddev" else service
+    for query in ("context.dev", "brand.dev"):
+        found = F.decide(query, [], judge_infra.Judgement(probs=None, ms=1), ix,
+                         provider_display=display)
+        assert found.verdict == F.NAME and found.name.keys == ("branddev",)
+        assert {e["provider"] for e in F.name_page(found.name, cat)} == {"branddev"}
 
 
 async def test_v2_streams_units_and_the_answer_and_logs_its_readings(clients, monkeypatch):

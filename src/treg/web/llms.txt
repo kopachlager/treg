@@ -119,7 +119,10 @@ call that fails frees its key at once. Over MCP the same thing is the `idempoten
 A `409` means the original call with that key is still running: retry shortly. A `410`
 `idempotency_response_lost` means the original call completed and was charged but treg could not keep
 its answer; the body names the `call_id` and the charge, `GET /calls/{call_id}/result` may still have
-the answer, and a new key calls again. A `410` `idempotency_outcome_unknown` means the original call
+the answer, and a new key calls again. A `410` `idempotency_response_too_large` means the
+original call completed and was charged, and you already received its full answer, but it was over
+treg's 2 MB retry limit and was not kept: the body names the `call_id`, the charge and the size, and
+a new key calls again. A `410` `idempotency_outcome_unknown` means the original call
 stopped before its outcome was recorded and may have reached the provider: `GET /calls/{call_id}`
 shows what it cost, and a new key calls again.
 
@@ -271,7 +274,8 @@ the hub is off on this registry the ids answer 404: use the routed endpoints bel
 or `linkedin_url`) and treg runs the best child — your own keys first, then cheapest per hit — and
 answers `{output, raw, _treg: {served_by, tried, charged_micro}}` with `X-Treg-Served-By`. A
 provider error OR a miss falls through to the next provider, cheapest first, within
-`X-Treg-Route-Max-Cost` (default $1 per call; misses on per-success providers are free) — send
+`X-Treg-Route-Max-Cost` (default $1 per call; misses on per-success providers are free, others bill
+them, so a routed row quotes `usd_per_call: null` rather than $0 — cap bulk runs) — send
 `X-Treg-Route-Waterfall: 0` to stop at the first miss. When the provider that served could not
 apply a filter you sent, the answer says so in `X-Treg-Ignored-Filters` and `_treg.ignored_filters`
 (post-filter the rows, or say why they are off); send `X-Treg-Route-Strict-Filters: 1` to be refused
@@ -335,6 +339,10 @@ terminal response, or one more catalog call that fetches it).
 - **Money:** reserved at submission, charged only when the task succeeds; a failed or moderated task
   refunds the whole hold. `treg audit`, `GET /calls` (`async_task`) and the dashboard Activity page
   show each task's state and, once done, the result link.
+- **Some async tools usually answer at once** (an email verification): a first response that is
+  already finished is the answer, charged as one, and `--await` prints it without polling. If it
+  says "still working", poll no faster than `interval` and stop at `max_age` seconds; a task with
+  no answer by then is refunded.
 - **Result URLs expire** (`ttl_note` in the descriptor; MiniMax ~9h). Download promptly; treg never
   stores generated media. Fetch-mode routes need one more call - `--await` prints that command.
 
