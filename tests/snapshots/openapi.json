@@ -3399,6 +3399,69 @@
         "summary": "Admin Referrals"
       }
     },
+    "/admin/share": {
+      "get": {
+        "description": "Who served each job over the last `minutes` (at most 360). `requests` counts what callers\nasked (direct calls and routed parents, never a routed attempt); `by_provider` counts the 2xx\nanswers each provider gave, directly or as a routed attempt. One read over an id range.",
+        "operationId": "admin_share_admin_share_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "minutes",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "title": "Minutes",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-treg-token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Treg-Token",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "treg_session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Treg Session",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Admin Share Admin Share Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Share"
+      }
+    },
     "/admin/stats": {
       "get": {
         "description": "Platform totals for the admin page. Every count runs in the database.\n\nLoading the whole call table to count it in Python ran past the request timeout at production\nsize, so the page got a 502. Call counts now come from `endpointdaystat` (one row per endpoint\nper day, folded by the `treg-worker catalog stats` cron): calls the provider saw, as of that\njob's last run. The all-time total is Postgres's own row estimate, not an exact count.",

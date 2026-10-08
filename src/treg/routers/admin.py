@@ -11,7 +11,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import func, or_, text
+from sqlalchemy import case, func, or_, text
 from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -185,6 +185,43 @@ async def admin_tools(_: str = Depends(require_superadmin), db: AsyncSession = D
     )).scalars().all()}
     return [{"id": t.id, "name": t.name, "org": omap[t.org_id].slug if t.org_id in omap else None,
              "host": t.host, "owner": t.owner, "injectors": [b.get("injector") for b in t.bindings]} for t in tools]
+
+
+@app.get("/admin/share")
+async def admin_share(
+    minutes: int = 60, _: str = Depends(require_superadmin), db: AsyncSession = Depends(get_admin_session)
+) -> dict:
+    """Who served each job over the last `minutes` (at most 360). `requests` counts what callers
+    asked (direct calls and routed parents, never a routed attempt); `by_provider` counts the 2xx
+    answers each provider gave, directly or as a routed attempt. One read over an id range."""
+    from ..application import catalog_stats
+    from ..domain.catalog import store as catalog_store
+    minutes = max(1, min(minutes, 360))
+    since = _utcnow_naive() - timedelta(minutes=minutes)
+    first = await catalog_stats._first_id_at(db, since)
+    attempt = CallRecord.call_ref.like("%:r%")
+    ok = case((CallRecord.status_code.between(200, 299), 1), else_=0)
+    rows = (await db.execute(
+        select(CallRecord.endpoint_id, CallRecord.provider, attempt, func.count(), func.sum(ok))
+        .where(CallRecord.id >= first, CallRecord.endpoint_id.is_not(None))
+        .group_by(CallRecord.endpoint_id, CallRecord.provider, attempt))).all()
+    by_id = catalog_store.load().by_id
+
+    def capability(endpoint_id: str) -> str:
+        cap = (by_id.get(endpoint_id) or {}).get("capability")
+        return cap or (endpoint_id[len("treg."):] if endpoint_id.startswith("treg.") else "(none)")
+
+    jobs: dict[str, dict] = {}
+    for endpoint_id, provider, is_attempt, n, n_ok in rows:
+        job = jobs.setdefault(capability(endpoint_id), {"requests": 0, "answered": 0, "by_provider": {}})
+        if not is_attempt:
+            job["requests"] += n
+            job["answered"] += int(n_ok or 0)
+        if provider and provider != "treg" and n_ok:
+            job["by_provider"][provider] = job["by_provider"].get(provider, 0) + int(n_ok)
+    ordered = sorted(jobs.items(), key=lambda kv: -kv[1]["requests"])
+    return {"since": since.isoformat(), "minutes": minutes,
+            "jobs": [{"capability": cap, **job} for cap, job in ordered]}
 
 
 def _error_reason(text: str | None) -> str | None:
