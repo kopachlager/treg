@@ -3,7 +3,7 @@ that turns the latest snapshot into a served/exhausted state."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +37,7 @@ _KNOWN: dict[str, tuple[str, str, str]] = {
     "thecompaniesapi": ("credits", "manual", "api"),
     "tomba": ("monthly_quota", "quota_reset", "api"),
     "hunter": ("monthly_quota", "quota_reset", "api"),
-    "quickenrich": ("monthly_quota", "quota_reset", "api"),
+    "quickenrich": ("monthly_quota", "quota_reset", "none"),
     "prospeo": ("monthly_quota", "quota_reset", "api"),
     "aiark": ("monthly_quota", "quota_reset", "api"),
     "wiza": ("credits", "manual", "api"),

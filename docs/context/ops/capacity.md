@@ -249,21 +249,13 @@ account's empty-credit response before adding a signature or enabling overflow.
 
 ## QuickEnrich subscriptions
 
-`collectors._quickenrich` reads `meta.remaining_credits` from a free Contact Finder miss;
-there is no account/balance endpoint to list. Default policy is `monthly_quota` / `quota_reset`,
-with auto-funding disabled. The API does not report the renewal timestamp, so no calendar reset
-is guessed. Subsequent sweeps discover replenished credits. Do not model this as prepaid packs
-or auto-top-up. Hunter also uses renewal quotas: monthly plans reset monthly, yearly plans
-annually ([Hunter reset rules](https://help.hunter.io/en/articles/1911597-when-do-credits-reset)).
-
-Free, Starter and Growth use the API-reported remaining allowance. No manual plan setting
-can override that value. A reported zero means exhausted; missing, negative or non-numeric
-balance data means unknown, not unlimited. The unlimited-plan API response has not been
-verified. Inspect its actual status and balance fields before adding common unlimited-plan
-support. Per-call billing remains separate: use `meta.credits_used` at the treg list rate.
-
-Exhaustion behavior is acknowledged as unrecorded in the existing shared signature guard;
-we did not exhaust the trial to manufacture evidence. No overflow route is claimed.
+QuickEnrich is on `NO_BALANCE_API`. Its docs show `meta.remaining_credits` on every response, but
+the live API returns a meta without it on a free Contact Finder miss or hit and no meta at all on
+a billed employee search, so no free or billed call can read the allowance. The policy stays
+`monthly_quota` / `quota_reset` with `source: none` and auto-funding disabled: the subscription
+allowance is read in the vendor dashboard, and a reported zero there means exhausted. Per-call
+billing is separate and unchanged. Exhaustion behavior is unrecorded; the trial was not spent to
+manufacture it, and no overflow route is claimed.
 
 
 ## Dropleads credits
