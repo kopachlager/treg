@@ -29,7 +29,7 @@ export default {
 
 <template>
 <div class="pl" :class="{dopen:!!drawerEp}">
-  <div v-if="platLoading || catalogArm==='pending'" class="pl-empty">Loading the catalog…</div>
+  <div v-if="platLoading" class="pl-empty">Loading the catalog…</div>
   <div v-else-if="platErr" class="pl-empty">{{platErr}}</div>
 
   <!-- THE SHELF -->
@@ -38,6 +38,7 @@ export default {
       <nav class="pl-crumbs" aria-label="Breadcrumb"><a href="/catalog" @click.prevent="go('catalog')">Catalog</a><span>/</span>{{platLabel}}</nav>
       <h1>{{platLabel}}</h1>
       <p v-if="platRow && platRow.summary" class="pl-lede">{{platRow.summary}}</p>
+      <p v-if="platPaused(platRow)" class="mk-notice">{{providerPaused(platRow.providers[0]).message}}</p>
       <CatalogSearch v-model="platQ" :scope="platSlug" :scope-label="platLabel"
                      :placeholder="'Search '+platLabel+', or describe what your agent needs to do'" />
     </header>
@@ -105,7 +106,8 @@ export default {
       <header class="pl-hero">
         <nav class="pl-crumbs" aria-label="Breadcrumb"><a href="/catalog" @click.prevent="go('catalog')">Catalog</a><span>/</span><a
           :href="platUrl(platSlug)" @click.prevent="closeComparison">{{platLabel}}</a></nav>
-        <h1 class="pl-h1-cmp">{{platCapRow.description}}</h1>
+        <h1 class="pl-h1-cmp">{{platCapRow.title||platCapRow.description}}</h1>
+        <p v-if="platCapRow.title && platCapRow.title!==platCapRow.description" class="pl-lede">{{platCapRow.description}}</p>
       </header>
 
       <!-- treg's own answer first when there is one: one call, and nobody has to choose. -->

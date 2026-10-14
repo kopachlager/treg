@@ -36,6 +36,9 @@ def _cat() -> store.Catalog:
         _ep("scrapecreators.x.trending", "", "tiktok", "scrapecreators", "Trending videos",
             "Videos trending on TikTok today"),
         _ep("hunter.account.usage", "", "people", "hunter", "Account usage", "Credits left", kind="utility"),
+        # a platform with one endpoint: its model's name appears in one name only
+        _ep("router.ai-judge.decide", "ai-judge.decide", "ai-judge", "router", "Judge evidence with Jev (TypeSafe)",
+            "A label or a probability over evidence"),
     ]
     return store.Catalog(
         platforms={
@@ -43,6 +46,7 @@ def _cat() -> store.Catalog:
             "tiktok": {"label": "TikTok", "category": "Social"},
             "tiktok-ads": {"label": "TikTok Ads", "category": "Advertising"},
             "image-gen": {"label": "Image generation", "category": "AI generation"},
+            "ai-judge": {"label": "AI judgment", "category": "AI generation"},
         },
         capabilities={
             "people.email.find": "Find a person's work email from their name and company",
@@ -50,6 +54,7 @@ def _cat() -> store.Catalog:
             "tiktok.video.comments": "List a video's comments",
             "tiktok-ads.library.search": "Search the TikTok ad library",
             "image-gen.flux.generate": "Generate images with FLUX",
+            "ai-judge.decide": "Judge evidence: a label, a score or a probability",
         },
         endpoints=eps, by_id={e["id"]: e for e in eps},
         aliases={"t2i": ["text-to-image"], "mail": ["email"], "tts": ["text-to-speech"]},
@@ -153,6 +158,10 @@ def test_names_platform_then_provider_then_product():
     assert fr.name_of("scr", ix) is None                                       # a prefix needs four letters
     product = fr.name_of("flux", ix)
     assert product.kind == "product" and set(product.keys) == {"replicate.flux.schnell", "falco.flux.pro"}
+    # a one-endpoint platform's model: its name's words that no other name uses are its product names
+    assert fr.name_of("jev", ix) == fr.NameHit("product", ("router.ai-judge.decide",), exact=True, label="jev")
+    assert fr.name_of("typesafe", ix).keys == ("router.ai-judge.decide",)
+    assert fr.name_of("with", ix) is None and fr.name_of("judge", ix).kind != "product"   # a stopword, a platform word
     assert fr.name_of("find a work email", ix) is None
     assert fr.name_of("tts", ix) is None                                      # an alias is vocabulary, not a name
     # on a shelf only a provider there counts

@@ -16,6 +16,7 @@ async loadBilling(){ if(!this.canAdmin || !this.activeOrgId){ this.billing=null;
       if(this.billing){ this.topupAmount=this.billing.topup.default_usd;
         this.autoAmount=Math.round(this.billing.autotopup.amount_usd);
         this.autoThreshold=Math.round(this.billing.autotopup.threshold_usd);
+        this.autoPerHour=this.billing.autotopup.per_hour||5;
         this.loadBillingHistory(); }
       // The daily cap lives beside the balance for the user even though it is an org setting.
       const capCfg=await this.api(`/orgs/${org}/settings`).catch(()=>null);
@@ -63,6 +64,14 @@ async toggleBlock(b){ this.budErr='';
 async removeBudget(b){ this.budErr='';
       try{ await this.api(this._budgetUrl(b.dim, b.val), {method:'DELETE'}); await this._reloadBudgets();
       }catch(e){ this.budErr=this._errMsg(e, 'could not remove that'); } },
+// The archive opt-out (archive.md, "Opting out"). `capCfg` is the whole settings document, so the
+// reply replaces it.
+async setArchive(on){ this.archiveBusy=true; this.archiveErr='';
+      try{
+        this.capCfg=await this.api(`/orgs/${this.activeOrgId}/settings`,
+          {method:'PATCH', headers:{'content-type':'application/json'}, body:JSON.stringify({archive:!!on})});
+      }catch(e){ this.archiveErr=this._errMsg(e, 'could not change that'); }
+      finally{ this.archiveBusy=false; } },
 async saveCap(){ this.capBusy=true; this.capErr='';
       try{
         const micro=Math.round(parseFloat(this.capUsd||'0')*1e6);
@@ -129,7 +138,7 @@ async payTopup(){ const usd=this.topupUsd; if(!this.topupValid) return;
           // saved card then arms it from the setup webhook. A failure here stops the payment too -
           // paying without the auto top-up the user just agreed to would be a silent downgrade.
           const armed=await this.api('/billing/autotopup',{method:'POST',headers:{'content-type':'application/json'},
-            body:JSON.stringify({enabled:true, consent:true, amount_usd:this.autoAmount, threshold_usd:this.autoThreshold, monthly_cap_usd:this.autoCapUsd, setup_url:false})});
+            body:JSON.stringify({enabled:true, consent:true, amount_usd:this.autoAmount, threshold_usd:this.autoThreshold, monthly_cap_usd:this.autoCapUsd, per_hour:this.autoPerHour, setup_url:false})});
           if(this.activeOrgId===org) this.billing=armed;
         }
         // The request below carries the ACTIVE team; after a switch it would buy credit for the
@@ -144,7 +153,7 @@ async payTopup(){ const usd=this.topupUsd; if(!this.topupValid) return;
       this.autoOpen=!this.autoOpen; if(!this.autoOpen) this.autoConsent=false; },
 async setAuto(on){ this.billingBusy=true; this.err='';
       try{ const out=await this.api('/billing/autotopup',{method:'POST',headers:{'content-type':'application/json'},
-             body:JSON.stringify({enabled:on, consent:on, amount_usd:on?this.autoAmount:null, threshold_usd:on?this.autoThreshold:null})});
+             body:JSON.stringify({enabled:on, consent:on, amount_usd:on?this.autoAmount:null, threshold_usd:on?this.autoThreshold:null, per_hour:on?this.autoPerHour:null})});
         // No card yet: consent is stored, and Stripe's hosted card page finishes the job. Auto top-up
         // arms itself from the setup_intent.succeeded webhook, so there's nothing more to click here.
         if(out.setup_url){ window.location.href=out.setup_url; return; }

@@ -17,6 +17,7 @@ import time
 import httpx
 
 from ..config import get_settings
+from .house_calls import HouseCalls
 
 KV_NS, KV_KEY = "jev", "xboost"
 KV_TTL_S = 400 * 86400          # the run is replaced daily; the TTL only sweeps a dead deployment
@@ -234,11 +235,15 @@ class _Treg:
     """treg's public /call/ API as a visitor's agent sees it: routed endpoint, JSON body, real bill."""
 
     def __init__(self, http: httpx.AsyncClient):
-        s = get_settings()
-        self.http, self.base = http, s.public_url.rstrip("/")
-        self.headers = {"X-Treg-Token": s.jev_treg_token, "X-Treg-Client": "jev-xboost"}
-        self.cost_usd = 0.0
-        self.calls: dict[str, int] = {}
+        self.house = HouseCalls(http, get_settings().jev_treg_token, "jev-xboost")
+
+    @property
+    def cost_usd(self) -> float:
+        return self.house.cost_micro / 1e6
+
+    @property
+    def calls(self) -> dict[str, int]:
+        return self.house.calls
 
     async def call(self, endpoint: str, body: dict, kind: str, **headers: str) -> dict:
         return await self._request("POST", endpoint, kind, json=body, headers=headers)
@@ -248,22 +253,14 @@ class _Treg:
 
     async def _request(self, method: str, endpoint: str, kind: str, *, json: dict | None = None,
                        params: dict | None = None, headers: dict | None = None) -> dict:
-        self.calls[kind] = self.calls.get(kind, 0) + 1
-        try:
-            r = await self.http.request(method, f"{self.base}/call/{endpoint}", json=json, params=params,
-                                        headers={**self.headers, **(headers or {})}, timeout=60)
-        except httpx.HTTPError as exc:
-            raise XboostError(f"treg call failed: {type(exc).__name__}") from exc
-        self.cost_usd += int(r.headers.get("X-Treg-Cost-Micro") or 0) / 1e6
-        if r.status_code >= 400:
-            if r.status_code in (404, 502):       # a routed miss: every child said no
+        a = await self.house.request(method, endpoint, kind, json=json, params=params, headers=headers)
+        if a.status == 0:
+            raise XboostError(f"treg call failed: {a.error}")
+        if a.status >= 400:
+            if a.status in (404, 502):       # a routed miss: every child said no
                 return {}
-            raise XboostError(f"treg answered HTTP {r.status_code} on {endpoint}")
-        try:
-            d = r.json()
-        except ValueError:
-            return {}
-        return d if isinstance(d, dict) else {"output": d}
+            raise XboostError(f"treg answered HTTP {a.status} on {endpoint}")
+        return a.body
 
 
 async def _jev(http: httpx.AsyncClient, state: dict) -> tuple[dict, dict]:

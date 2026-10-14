@@ -41,7 +41,8 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, replace
 from typing import Annotated, Any, TypedDict
 from urllib.parse import parse_qsl, urlsplit
 
@@ -53,7 +54,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp.types import AudioContent, CallToolResult, METHOD_NOT_FOUND, TextContent, ToolAnnotations
 
-from . import analytics, audit, hints
+from . import analytics, audit, client_ip, hints, jsontext, oauth_providers
 from .application import catalog_find as find_app
 from .application import catalog_search as search_app
 from .application import search_experiment
@@ -61,10 +62,12 @@ from .domain.catalog import store as catalog_store
 from .config import PUBLIC_HOST_ALIASES, get_settings
 from .feedback_contract import FeedbackCategory, FEEDBACK_DESCRIPTION, ReviewUsefulness, REVIEW_DESCRIPTION
 from .domain.catalog.stats import EndpointObservationReader
+from .infra import org_traffic
 
 # Every tool must declare what it can DO, and the review process checks these against real behaviour.
-# Read-only means it changes nothing anywhere; open-world means it can change state visible on the
-# public internet; destructive means an effect that cannot be undone.
+# Read-only means it changes nothing anywhere; open-world means what it sends leaves the caller's own
+# account (an upstream provider, the treg team, a public catalog page); destructive means an effect
+# that cannot be undone.
 _READS = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False,
                          idempotent_hint=True)
 # `call` is the honest exception, and it is honest in the strongest direction: it relays whatever the
@@ -103,6 +106,14 @@ class _SurfacePolicy:
     client_name: str
     event_source: str
     next_call: str
+    # Renders the review or feedback invitation `/call/` decided on. Without the tools to answer
+    # it, a surface must not ask: `/call/` still decides and records, this surface does not show it.
+    invites: bool = True
+    # Catalog platforms this surface neither lists, describes nor calls.
+    hidden_platforms: frozenset[str] = frozenset()
+
+    def hides(self, ep: dict | None) -> bool:
+        return bool(ep) and ep.get("platform") in self.hidden_platforms
 
 
 _TEAM_SURFACE = _SurfacePolicy(
@@ -110,10 +121,17 @@ _TEAM_SURFACE = _SurfacePolicy(
     event_source="mcp",
     next_call="call(...)"
 )
+# The Claude directory listing was submitted as a server that does not use AI models to generate
+# images, video or audio; these platforms are exactly those models. AI judgment (labels and scores
+# over supplied evidence) generates none of them and stays. The team `/mcp/` keeps every platform.
+_DIRECTORY_HIDDEN_PLATFORMS = frozenset({"image-gen", "video-gen", "voice-gen", "music-gen"})
+_DIRECTORY_HIDDEN_NOTE = "this connector does not offer image, video, voice or music generation"
 _DIRECTORY_SURFACE = _SurfacePolicy(
     client_name="claude-connector",
     event_source="claude-connector",
     next_call="catalog_call_read(...) or catalog_call_write(...), based on the documented method",
+    invites=False,
+    hidden_platforms=_DIRECTORY_HIDDEN_PLATFORMS,
 )
 
 
@@ -151,6 +169,42 @@ class _StaticSurfaceCapabilities:
 
 
 _HUB_TOOL_NAMES = frozenset({"hub_create", "hub_update", "hub_mine"})
+
+# OpenAI's clients: ChatGPT and its plugin reviewer send `openai-mcp/...`, Codex `codex-mcp-client/...`.
+# Their plugin review reads an agent-initiated `review`, and the review/feedback invitations in call
+# results, as collecting behavioral data for analytics. Those clients get neither; every other client
+# keeps both. `/call/` still decides and records an invitation, this surface just does not show it.
+_OPENAI_UA_PREFIXES = ("openai-mcp/", "codex-mcp-client/")
+
+
+def _is_openai_client(headers: Any) -> bool:
+    headers = headers or {}
+    ua = headers.get("user-agent") or headers.get("User-Agent") or ""
+    return ua.lower().startswith(_OPENAI_UA_PREFIXES)
+
+
+class _OpenAIClientGate:
+    """For OpenAI's clients only: no `review` tool and no review sentence in the instructions."""
+
+    async def __call__(
+        self, ctx: ServerRequestContext[Any, Any], call_next: CallNext
+    ) -> HandlerResult:
+        result = await call_next(ctx)
+        if ctx.method not in ("tools/list", "initialize") or not _is_openai_client(
+                getattr(getattr(ctx, "request", None), "headers", None)):
+            return result
+        if ctx.method == "initialize":
+            if isinstance(result, dict):
+                return {**result, "instructions": _BASE_INSTRUCTIONS}
+            return result.model_copy(update={"instructions": _BASE_INSTRUCTIONS})
+        if isinstance(result, dict) and isinstance(result.get("tools"), list):
+            return {**result, "tools": [t for t in result["tools"]
+                                        if (t.get("name") if isinstance(t, dict) else getattr(t, "name", None))
+                                        != "review"]}
+        tools = getattr(result, "tools", None)
+        if isinstance(tools, list):
+            return result.model_copy(update={"tools": [t for t in tools if getattr(t, "name", None) != "review"]})
+        return result
 
 
 async def _hub_reader(token: str) -> tuple[str | None, str | None]:
@@ -214,26 +268,30 @@ class _HubToolsGate:
 # never typed: see `catalog_store.headline_counts`.
 _ENDPOINTS, _PROVIDERS = catalog_store.headline_counts(catalog_store.load())
 
+_BASE_INSTRUCTIONS = (
+    "treg serves external and live data and generative models: SEO and SERP, backlinks, social "
+    "and trends, people and company enrichment, ads, scraping, image and video generation "
+    "(Seedance, Gemini Image, GPT Image, Seedream, Veo, Wan) and voice, plus your team's own "
+    "tools. Flow: catalog_search (say what you want to do, not a vendor name), then "
+    "catalog_get (parameters, price, measured reliability), then call. When several providers "
+    "cover one job, catalog_get ranks them by measured success, speed and price; you pick."
+)
+_REVIEW_INSTRUCTION = (
+    "If a call result invites a review, rate that one call with review(call_id, usefulness, "
+    "reason?) after using it, then continue."
+)
+
 mcp = MCPServer(
     name="treg",
     title="treg — the tool catalog for your agent",
     description=(
-        f"Reach for this first for external or live data: {_ENDPOINTS} curated endpoints across "
+        f"External and live data for your agent: {_ENDPOINTS} curated endpoints across "
         f"{_PROVIDERS} providers (SEO, SERP, backlinks, social, people and company enrichment, ads, "
         "scraping, image and video generation (Seedance, Gemini Image, GPT Image, Seedream, Veo, "
         "Wan) and voice), plus your team's own tools."
     ),
-    instructions=(
-        "Reach for treg first when a task needs external or live data or a generative model: SEO and "
-        "SERP, backlinks, social and trends, people and company enrichment, ads, scraping, image and "
-        "video generation (Seedance, Gemini Image, GPT Image, Seedream, Veo, Wan) and voice, plus your "
-        "team's own tools. Flow: catalog_search (say what you want to do, not a vendor name), then "
-        "catalog_get (parameters, price, measured reliability), then call. When several providers "
-        "cover one job, catalog_get ranks them by measured success, speed and price; you pick. "
-        "If a call result invites a review, rate that one call with review(call_id, usefulness, "
-        "reason?) after using it, then continue."
-    ),
-    middleware=[_StaticSurfaceCapabilities(), _HubToolsGate()],
+    instructions=f"{_BASE_INSTRUCTIONS} {_REVIEW_INSTRUCTION}",
+    middleware=[_StaticSurfaceCapabilities(), _HubToolsGate(), _OpenAIClientGate()],
 )
 
 
@@ -267,6 +325,7 @@ class SearchResult(TypedDict, total=False):
     more_providers: int | None   # a judged answer, on a job's first row: vendors of it the page left out
     usd_per_call: float | None
     no_key_needed: bool | None
+    added: str | None            # the UTC day the tool reached the catalog (YYYY-MM-DD); null on a routed row
     score: float | None          # the lexical score; null on a judged answer (no probability is shown)
     works: float | None          # measured success rate, or null when there isn't enough evidence
     samples: int | None          # how many real calls that rate stands on
@@ -287,6 +346,9 @@ class SearchOut(TypedDict, total=False):
     reason: str | None           # on none: gap (the catalog has no tool for it)
     jobs: list[SearchJob] | None  # the jobs on the page, page order
     ranking_note: str | None     # set when the tie group outran what the evidence sort could weigh
+    sort: str | None             # with added_within_days or sort: best | newest, the order applied
+    added_within_days: int | None  # the window applied, after the cap
+    capped_at_days: int | None   # set when added_within_days asked for more than the maximum
     near: list[dict] | None      # zero results only: the rows just under the gate + the words they miss
     hint: str | None
     next: str | None
@@ -355,6 +417,7 @@ class CatalogGetOut(TypedDict, total=False):
 class CallOut(TypedDict, total=False):
     call_id: str | None
     status: int | None              # the UPSTREAM status, relayed
+    retry_after: str | None         # HTTP Retry-After, preserved where MCP cannot send that header
     endpoint_id: str | None
     replayed: bool | None           # answered from an earlier call with the same idempotency_key
     body: Any                       # the provider's response, verbatim
@@ -412,13 +475,22 @@ class MyToolsOut(TypedDict, total=False):
     hint: str | None
 
 
+# The caller's address for the tool call running in this task, resolved from the inbound MCP
+# request by `_bearer` and forwarded by `_api` on every in-process call. Without it each internal
+# request would come from the ASGI transport's loopback peer, and every MCP caller would share one
+# per-IP bucket. Task-scoped, so concurrent tool calls never see each other's address.
+_caller_ip: ContextVar[str] = ContextVar("treg_mcp_caller_ip", default="")
+
+
 def _bearer(ctx: Context) -> str:
-    """The caller's token, straight from the request headers.
+    """The caller's token, straight from the request headers. Every tool starts here, so it also
+    records the caller's address (`_caller_ip`) for the internal calls that follow.
 
     Returns "" when absent — every authenticated tool then fails closed with an instruction rather
     than a stack trace, because a missing token is the single most likely first-run problem.
     """
     headers = ctx.headers or {}
+    _caller_ip.set(client_ip.from_headers(headers, None) if headers else "")
     raw = headers.get("authorization") or headers.get("Authorization") or ""
     return raw.removeprefix("Bearer ").removeprefix("bearer ").strip()
 
@@ -580,16 +652,21 @@ async def _api(token: str, *, client_name: str = "mcp"):
         timeout=_TIMEOUT,
         # X-Treg-Client is attribution, not auth: without it every MCP-originated call lands
         # in the audit trail as client="", indistinguishable from unreported CLI traffic.
-        headers={**await _internal_auth(token), "X-Treg-Client": client_name},
+        headers={**await _internal_auth(token), "X-Treg-Client": client_name,
+                 **client_ip.forwarding_headers(_caller_ip.get())},
     ) as client:
         yield client
 
 
 def _body(r: httpx.Response) -> Any:
     try:
-        return r.json()
+        body = r.json()
     except ValueError:
         return r.text
+    # A lone surrogate parsed out of an upstream's JSON makes the SDK's pydantic dump raise, and the
+    # agent gets "Error serializing to JSON" with no body, call_id or cost for a call it paid for.
+    # pydantic cannot write the escape, so the surrogate becomes U+FFFD (treg/jsontext.py).
+    return jsontext.scrub_surrogates(body) if jsontext.may_hold_surrogates(r.content) else body
 
 
 async def _resolve_org(client: httpx.AsyncClient) -> tuple[int | None, str | None, dict | None]:
@@ -696,13 +773,17 @@ async def _whose_grant(client: httpx.AsyncClient, slug: str | None, *, oauth: bo
         "provider or platform name lists what it offers. Returns each endpoint's id, provider, price "
         "per call, and whether treg can serve it without you owning an API key. Read `verdict`: "
         "strong = these do it; closest = nearest, check catalog_get; none = not in the catalog, file "
-        "catalog_request. Call this FIRST when a task needs data or an API you have no key for."
+        "catalog_request. Use it when a task needs data or an API you have no key for. "
+        "Recently added tools: added_within_days=N (1-365; 30 is a good default) keeps tools added "
+        "in the last N days, sort='newest' lists newest first; with either, query may be empty."
     ),
     annotations=_READS,
     structured_output=True
 )
-async def catalog_search(query: str, ctx: Context, limit: int = 8) -> SearchOut:
-    return await _catalog_search_impl(query, limit, ctx=ctx, surface=_TEAM_SURFACE)
+async def catalog_search(query: str, ctx: Context, limit: int = 8, added_within_days: int | None = None,
+                         sort: str | None = None) -> SearchOut:
+    return await _catalog_search_impl(query, limit, ctx=ctx, surface=_TEAM_SURFACE,
+                                      added_within_days=added_within_days, sort=sort)
 
 
 async def _search_identity(ctx: Context | None) -> tuple[str | None, int | None, str | None]:
@@ -728,13 +809,19 @@ async def _search_identity(ctx: Context | None) -> tuple[str | None, int | None,
 
 
 async def _catalog_search_impl(
-    query: str, limit: int = 8, *, ctx: Context | None = None, surface: _SurfacePolicy
+    query: str, limit: int = 8, *, ctx: Context | None = None, surface: _SurfacePolicy,
+    added_within_days: int | None = None, sort: str | None = None,
 ) -> SearchOut:
     """The use case is `application.catalog_search`: the shipped ranker's page, the discovery
     experiment's say over it, and the records. This layer resolves who is asking (the hub's lists
-    and the experiment's log both need it) and shapes the rows for an agent."""
+    and the experiment's log both need it) and shapes the rows for an agent. With a recently-added
+    option the page is `search_app.added_page` instead: a date list, no judge, no experiment."""
     cat = catalog_store.load()
     limit = max(1, min(limit, 25))
+    try:
+        opts = catalog_store.added_options(added_within_days, sort)
+    except catalog_store.AddedOptionError as e:
+        return {"error": "invalid_option", "detail": str(e)}
     # While a list limits the hub, only a caller in it (by team or by email) sees hub rows.
     hub_slug = hub_email = None
     if get_settings().hub_enabled and get_settings().hub_limited:
@@ -742,10 +829,21 @@ async def _catalog_search_impl(
         if token:
             hub_slug, hub_email = await _hub_reader(token)
     from .routers.catalog import _provider_display
-    page = await search_app.search(
-        query, limit, cat=cat, source=surface.event_source,
-        caller=search_app.Caller(hub_slug=hub_slug, hub_email=hub_email),
-        observed=_observed_stats, identify=lambda: _search_identity(ctx), provider_display=_provider_display)
+    if opts.active:
+        page = await search_app.added_page(
+            query, cat, limit, opts, caller=search_app.Caller(hub_slug=hub_slug, hub_email=hub_email),
+            observed=_observed_stats)
+    else:
+        page = await search_app.search(
+            query, limit, cat=cat, source=surface.event_source,
+            caller=search_app.Caller(hub_slug=hub_slug, hub_email=hub_email),
+            observed=_observed_stats, identify=lambda: _search_identity(ctx), provider_display=_provider_display)
+    withheld = 0
+    if surface.hidden_platforms:
+        rows = [(ep, score) for ep, score in page.rows if not surface.hides(ep)]
+        withheld = len(page.rows) - len(rows)
+        page = replace(page, rows=rows, total=max(len(rows), page.total - withheld), jobs=[
+            j for j in page.jobs if j.capability.split(".", 1)[0] not in surface.hidden_platforms])
     ranked, stats, hidden, total, _steering = page.rows, page.stats, page.hidden, page.total, page.steering
     if page.arm is not None:
         analytics.capture(page.caller_key or "anonymous", "catalog_search_judged", {
@@ -784,6 +882,7 @@ async def _catalog_search_impl(
                 and any(get_settings().platform_key_for((cat.by_id.get(i) or {}).get("provider"))
                         for i in ep.get("routed_children") or [])
                 or bool(get_settings().platform_key_for(ep.get("provider")))),
+            "added": ep.get("added") or None,
             "score": None if page.judged else score,
             # The measured half of the answer, at the step where the agent is choosing. Without it
             # the "your agent picks on evidence" story only came true at catalog_get — one endpoint
@@ -792,6 +891,21 @@ async def _catalog_search_impl(
             "samples": obs.get("samples") or 0,
         })
     out = {"query": query, "count": len(results), "total_matches": total, "results": results}
+    if opts.active:
+        out["sort"] = "newest" if opts.newest or not query.strip() else "best"
+        if opts.days is not None:
+            out["added_within_days"] = opts.days
+        if opts.capped:
+            out["capped_at_days"] = catalog_store.ADDED_DAYS_MAX
+        within = f" in the last {opts.days} days" if opts.days else ""
+        out["hint"] = ((f"added_within_days is capped at {catalog_store.ADDED_DAYS_MAX}. " if opts.capped else "")
+                       + (f"{total} tools added{within}" + (f" match {query!r}" if query.strip() else "")
+                          if results else f"no tool{' matching ' + repr(query) if query.strip() else ''} "
+                                          f"was added{within or ' yet'}"))
+        if results:
+            out["next"] = ("catalog_get(endpoint_id) for parameters and the exact price, then "
+                           f"{surface.next_call}")
+        return out
     if page.verdict is not None:
         out["verdict"] = page.verdict
         if page.verdict == find_app.NONE:
@@ -803,6 +917,13 @@ async def _catalog_search_impl(
         out["ranking_note"] = (f"{query!r} matches too broadly to rank on measured reliability past "
                                f"the first {catalog_store.RERANK_BAND} equally-scoring rows — "
                                f"add a word to narrow it")
+    if withheld and not results:
+        # Every match was a generation tool this surface hides: say so, not "nothing matches" or
+        # "file a request", either of which sends the agent looking for what is withheld on purpose.
+        for key in ("verdict", "reason", "jobs", "ranking_note"):
+            out.pop(key, None)
+        out["hint"] = _DIRECTORY_HIDDEN_NOTE
+        return out
     if page.verdict == find_app.NONE:
         # a catalog gap, read by the judge: the answer that stops an agent re-querying is to say
         # so and name the way to file it - no near misses, whose advice is the opposite. Where the
@@ -815,7 +936,8 @@ async def _catalog_search_impl(
     elif not results:
         # the zero-result answer carries the rows that JUST missed the gate and which words they
         # missed — the caller is an LLM, and told exactly what to drop it re-queries correctly
-        near = catalog_store.near_misses(query, cat)
+        near = [n for n in catalog_store.near_misses(query, cat)
+                if not surface.hides(cat.by_id.get(n["endpoint_id"]))]
         if near:
             out["near"] = near
             first = near[0]
@@ -871,8 +993,8 @@ def _verdict_hint(page, cat: catalog_store.Catalog) -> str | None:
         "capability or provider is missing. Requests are the demand signal that decides which "
         "provider gets added next. Use AFTER catalog_search comes up empty, not instead of it."
     ),
-    # A write, but a harmless one: it files a report on treg itself — nothing upstream, nothing spent.
-    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False,
+    # A harmless write (nothing upstream, nothing spent), but the text goes to the treg team: open world.
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True,
                                 idempotent_hint=False),
     structured_output=True
 )
@@ -884,7 +1006,7 @@ async def catalog_request(capability: str, ctx: Context, note: str = "") -> Requ
 
 @mcp.tool(
     description=FEEDBACK_DESCRIPTION,
-    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False,
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True,
                                 idempotent_hint=False),
     structured_output=True,
 )
@@ -897,7 +1019,7 @@ async def feedback(
 
 @mcp.tool(
     description=REVIEW_DESCRIPTION,
-    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False,
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True,
                                 idempotent_hint=False),
     structured_output=True,
 )
@@ -1023,16 +1145,11 @@ async def _catalog_request_impl(
     """Relays to POST /tool-requests so the rate limiting, field caps and attribution live in one
     place; the bearer (when the session has one) turns into who-asked on the stored row."""
     token = _bearer(ctx)
-    # The in-process relay would otherwise collapse every MCP caller into one client IP ("?"),
-    # making the per-IP rate limit a single global bucket — forward the edge's X-Forwarded-For
-    # so the API's limiter sees the real caller.
-    xff = (ctx.headers or {}).get("x-forwarded-for") or (ctx.headers or {}).get("X-Forwarded-For") or ""
     api_context = (_api(token) if surface is _TEAM_SURFACE
                    else _api(token, client_name=surface.client_name))
     async with api_context as client:
         r = await client.post("/tool-requests", json={
-            "capability": capability, "note": note, "source": surface.event_source},
-            headers={"X-Forwarded-For": xff} if xff else {})
+            "capability": capability, "note": note, "source": surface.event_source})
     return _body(r)
 
 
@@ -1055,6 +1172,12 @@ async def _catalog_get_impl(
 ) -> CatalogGetOut:
     """Goes through the HTTP route rather than the store: that route attaches the observed
     reliability figures and the capability siblings, and those come from the database."""
+    ep = catalog_store.load().by_id.get(endpoint_id)
+    if surface.hides(ep):
+        return {"error": f"{endpoint_id} is not available here: {_DIRECTORY_HIDDEN_NOTE}"}
+    if ep is not None and catalog_store.paused(ep):
+        # `provider` is a dict in this schema, so the typed code rides in `error`, the words in `detail`.
+        return {"error": "provider_paused", "detail": oauth_providers.paused_message(ep["provider"])}
     token = _bearer(ctx)
     api_context = (_api(token) if surface is _TEAM_SURFACE
                    else _api(token, client_name=surface.client_name))
@@ -1141,6 +1264,7 @@ async def call(endpoint_id: str, params: dict | list | None = None,
     )
 
 
+@org_traffic.mcp_adapter("call")
 async def _call_impl(endpoint_id: str, params: dict | list | None = None,
                      method: str | None = None, idempotency_key: str | None = None,
                      query: dict | None = None, body: dict | list | str | None = None,
@@ -1160,6 +1284,9 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
     # could see and never call — which is how this gap was found.
     cat = catalog_store.load()
     ep = cat.by_id.get(endpoint_id)
+    if surface.hides(ep):
+        return {"error": f"{endpoint_id} is not available here: {_DIRECTORY_HIDDEN_NOTE}",
+                "endpoint_id": endpoint_id}
     # A hub tool (a maker's tool made of tools, `<team-slug>.<name>[@N]`) is neither a catalog id
     # nor `<tool>/<path>`; the server resolves it last on /call/. Let it through as a POST with
     # the inputs as the JSON body - the agent walk of the case study found this verb refusing a
@@ -1269,8 +1396,8 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
             return problem
         if slug:
             extra_headers["X-Treg-Org"] = slug
-        # Relay the caller tags off the MCP transport, the same way catalog_request forwards
-        # X-Forwarded-For. A builder proxying MCP sets this header once per session on their own HTTP
+        # Relay the caller tags off the MCP transport, the same way `_api` forwards the caller's
+        # address. A builder proxying MCP sets this header once per session on their own HTTP
         # client; the model never sees it, so it cannot be forgotten or invented.
         inbound_meta = (ctx.headers or {}).get("x-treg-meta") or (ctx.headers or {}).get("X-Treg-Meta")
         if inbound_meta:
@@ -1332,6 +1459,8 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
         r = await client.request(method, f"{route}/{endpoint_id}", **kw)
 
     out: dict[str, Any] = {"status": r.status_code, "endpoint_id": endpoint_id, "body": _body(r)}
+    if retry_after := r.headers.get("Retry-After"):
+        out["retry_after"] = retry_after
     if call_id := r.headers.get("X-Treg-Call-Id"):
         out["call_id"] = call_id
     if r.headers.get("X-Treg-Idempotent-Replay") == "true":
@@ -1359,7 +1488,8 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
             out["hint"] = (f"served through the overflow relay ({served_via.removeprefix('overflow:')}) "
                            f"at its real price because treg's {provider} account is out; cost_usd is "
                            f"what the relay billed, not the catalog's direct price")
-    if 200 <= r.status_code < 300 and not out.get("hint") and not out.get("replayed"):
+    if (200 <= r.status_code < 300 and not out.get("hint") and not out.get("replayed")
+            and surface.invites and not _is_openai_client(ctx.headers if ctx else None)):
         # /call/ decides whether to invite (application/call/invite.py) and records that it did;
         # this surface only renders the header into the single hint slot.
         kind = r.headers.get("X-Treg-Hint")
@@ -1367,6 +1497,11 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
             out["hint"] = hints.review_hint(out["call_id"])
         elif kind == "feedback":
             out["hint"] = hints.HINT
+    if routed := r.headers.get("X-Treg-Routed-Tool"):
+        out["routed_tool"] = routed
+        out["suggestion"] = (f"{routed} does this job: treg picks the provider, falls back when one "
+                             "fails or misses, and charges only the answer. Prefer it next time unless "
+                             "you need options only this provider has.")
     if r.status_code == 402:
         # States the fact and stops. No link, and `topup_url` is stripped from the relayed body, so
         # nothing on this path points a user at a payment page.
@@ -1388,6 +1523,7 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
     return out
 
 
+@org_traffic.mcp_adapter("call_media")
 async def _call_media_impl(
     endpoint_id: str, *, body: dict | list | str, headers: dict | None,
     idempotency_key: str | None, ctx: Context, catalog_only: bool,
@@ -1428,6 +1564,8 @@ async def _call_media_impl(
         route = "/catalog/call" if catalog_only else "/call"
         response = await client.post(f"{route}/{endpoint_id}", **kw)
     metadata: dict[str, Any] = {"status": response.status_code, "endpoint_id": endpoint_id}
+    if retry_after := response.headers.get("Retry-After"):
+        metadata["retry_after"] = retry_after
     if call_id := response.headers.get("X-Treg-Call-Id"):
         metadata["call_id"] = call_id
     if response.headers.get("X-Treg-Idempotent-Replay") == "true":
@@ -1593,14 +1731,6 @@ _DIRECTORY_WRITE = ToolAnnotations(
     title="Call a Write Endpoint",
     read_only_hint=False, destructive_hint=True, open_world_hint=True, idempotent_hint=False,
 )
-_DIRECTORY_MEDIA = ToolAnnotations(
-    title="Call an Audio Endpoint",
-    read_only_hint=False, destructive_hint=True, open_world_hint=True, idempotent_hint=False,
-)
-_DIRECTORY_RESOURCES = ToolAnnotations(
-    title="List Team Resources",
-    read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True,
-)
 _DIRECTORY_BALANCE = ToolAnnotations(
     title="Check Treg Balance",
     read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True,
@@ -1622,9 +1752,7 @@ directory_mcp = MCPServer(
         "want to do; catalog_get returns parameters, provider documentation, price and measured "
         "reliability; catalog_call_read and catalog_call_write execute the selected endpoint. When "
         "several providers cover one job, catalog_get ranks them by measured success, speed and "
-        "price; you pick. "
-        "If a call result invites a review, rate that one call with review(call_id, usefulness, "
-        "reason?) after using it, then continue."
+        "price; you pick."
     ),
     middleware=[_StaticSurfaceCapabilities()],
 )
@@ -1643,13 +1771,18 @@ for _name in ("httpx", "httpx2", "httpcore", "httpcore2"):
     description=(
         "Searches Treg's catalog by capability or task words and returns matching endpoint ids, "
         "providers, prices and measured reliability; `verdict` says whether they do the task "
-        "(strong), are the nearest (closest) or the catalog has no tool for it (none)."
+        "(strong), are the nearest (closest) or the catalog has no tool for it (none). "
+        "added_within_days (1-365) keeps tools added in the last N days and sort='newest' lists "
+        "newest first; with either, query may be empty."
     ),
     annotations=_DIRECTORY_SEARCH,
     structured_output=True,
 )
-async def directory_catalog_search(query: str, ctx: Context, limit: int = 8) -> SearchOut:
-    return await _catalog_search_impl(query, limit, ctx=ctx, surface=_DIRECTORY_SURFACE)
+async def directory_catalog_search(query: str, ctx: Context, limit: int = 8,
+                                   added_within_days: int | None = None,
+                                   sort: str | None = None) -> SearchOut:
+    return await _catalog_search_impl(query, limit, ctx=ctx, surface=_DIRECTORY_SURFACE,
+                                      added_within_days=added_within_days, sort=sort)
 
 
 @directory_mcp.tool(
@@ -1731,36 +1864,6 @@ async def directory_catalog_call_write(
 
 
 @directory_mcp.tool(
-    name="catalog_call_media",
-    title="Call an Audio Endpoint",
-    description=("Calls a catalog audio endpoint and returns a successful binary response as "
-                 "native MCP AudioContent, with call and cost metadata."),
-    annotations=_DIRECTORY_MEDIA,
-)
-async def directory_catalog_call_media(
-    endpoint_id: str, body: dict | list | str, ctx: Context,
-    headers: dict | None = None, idempotency_key: str | None = None,
-) -> Annotated[CallToolResult, MediaOut]:
-    return await _call_media_impl(
-        endpoint_id, body=body, headers=headers, idempotency_key=idempotency_key,
-        ctx=ctx, catalog_only=True, surface=_DIRECTORY_SURFACE,
-    )
-
-
-@directory_mcp.tool(
-    name="resources_list",
-    title="List Team Resources",
-    description="Lists durable provider resources owned by the connected team.",
-    annotations=_DIRECTORY_RESOURCES,
-    structured_output=True,
-)
-async def directory_resources_list(
-    ctx: Context, provider: str = "", kind: str = "",
-) -> ResourcesOut:
-    return await _resources_list_impl(provider, kind, ctx, surface=_DIRECTORY_SURFACE)
-
-
-@directory_mcp.tool(
     name="balance",
     title="Check Treg Balance",
     description="Returns the connected team's Treg balance, in-flight holds, team and identity.",
@@ -1785,33 +1888,6 @@ async def directory_catalog_request(capability: str, ctx: Context, note: str = "
     return await _catalog_request_impl(
         capability, ctx, note, surface=_DIRECTORY_SURFACE,
     )
-
-
-@directory_mcp.tool(
-    name="feedback",
-    title="Submit Feedback",
-    description=FEEDBACK_DESCRIPTION,
-    annotations=_DIRECTORY_ADDITIVE.model_copy(update={"title": "Submit Feedback"}),
-    structured_output=True,
-)
-async def directory_feedback(
-    category: FeedbackCategory, message: str, ctx: Context,
-    call_ids: list[str] | None = None, endpoint_id: str | None = None,
-) -> FeedbackOut:
-    return await _feedback_impl(
-        category, message, ctx, call_ids, endpoint_id, surface=_DIRECTORY_SURFACE,
-    )
-
-
-@directory_mcp.tool(
-    name="review", title="Review a Catalog Call", description=REVIEW_DESCRIPTION,
-    annotations=_DIRECTORY_ADDITIVE.model_copy(update={"title": "Review a Catalog Call"}),
-    structured_output=True,
-)
-async def directory_review(
-    call_id: str, usefulness: ReviewUsefulness, ctx: Context, reason: str | None = None,
-) -> ReviewOut:
-    return await _review_impl(call_id, usefulness, ctx, reason, surface=_DIRECTORY_SURFACE)
 
 
 # --------------------------------------------------------------------------------------------

@@ -79,7 +79,7 @@ def _provider_bindings(provider, secret: Secret) -> list[dict]:
         bindings = [{
             "secret_id": secret.id, "injector": "oauth", "location": "header",
             "name": "Authorization", "format": "Bearer {secret}",
-            "secret_field": provider.call_token_field,
+            "secret_field": _call_token_field(provider, secret),
         }]
     # A provider-required protocol header is a constant-format binding over the same encrypted
     # secret reference. `format` deliberately contains no {secret}: the existing injector stamps
@@ -96,6 +96,14 @@ def _provider_bindings(provider, secret: Secret) -> list[dict]:
             "name": provider.extra_credential_name, "format": "{secret}",
         })
     return bindings
+
+
+def _call_token_field(provider, secret: Secret) -> str:
+    """The blob field a call injects. A derived resource token exists only once a resource is
+    selected; until then the root token keeps the probe and the picker working."""
+    if provider.resource_token_path and not secret.resource_ref:
+        return "access_token"
+    return provider.call_token_field
 
 
 async def _autoprovision_provider_tool(
@@ -288,10 +296,17 @@ def _dig(obj, dotted: str):
     return obj
 
 
+def _refuse_paused(service: str | None) -> None:
+    """A paused provider (TREG_PAUSED_PROVIDERS) takes no new connect and no upstream work on an
+    existing connection; the connection itself is left exactly as it is."""
+    if oauth_providers.is_paused(service):
+        raise ConnectError("provider_paused", oauth_providers.paused_detail(service))
+
+
 class ConnectError(Exception):
     """A framework-neutral connection refusal translated by the HTTP router."""
 
-    def __init__(self, kind: str, detail: str):
+    def __init__(self, kind: str, detail: str | dict):
         self.kind = kind
         self.detail = detail
         super().__init__(kind)
@@ -321,6 +336,18 @@ async def start_oauth_connection(
                 raise ConnectError(
                     "unknown_provider",
                     f"unknown provider {provider_name!r} (known: {known})",
+                )
+            _refuse_paused(provider_name)
+            # A pasted-key provider has no consent screen and no scopes, so the capability lookup
+            # below would fail with "has no capability ''". Name the path that does connect it.
+            if provider.uses_pasted_secret:
+                raise ConnectError(
+                    "pasted_secret_provider",
+                    f"{provider.display_name} is connected with a pasted "
+                    f"{provider.token_label or 'API key'}, not browser consent. Paste it on the "
+                    "dashboard's Connections page, with "
+                    f"`treg connections connect --provider {provider.service}` on an up-to-date "
+                    "CLI (`treg update`), or via POST /connections/token",
                 )
             chosen_capability = capability or provider.connect_default_capability
             try:
@@ -372,6 +399,7 @@ async def start_oauth_connection(
             ))).scalars().first()
             if target is None:
                 raise ConnectError("unknown_connection", "unknown connection")
+            _refuse_paused(target.provider)
             if provider_name and target.provider != provider_name:
                 raise ConnectError(
                     "invalid_provider",
@@ -467,6 +495,7 @@ async def complete_oauth_connection(
                 await db.commit()
         return OAuthCallbackOutcome("exchange_failed")
 
+    reselect: tuple[int, str, str] | None = None
     # Phase 2 stores the result and provisions local rows. Re-read the pending row so two callback
     # deliveries cannot create two credentials after both complete their provider requests.
     async with session_maker() as db:
@@ -499,6 +528,11 @@ async def complete_oauth_connection(
             else:
                 secret.value = crypto.encrypt(json.dumps(blob))
                 secret.last_error = ""
+                # The new blob has no derived resource token. Unselect the resource so the tool
+                # binds the root token again, then derive the token anew once this commits.
+                if profile and profile.resource_token_path and secret.resource_ref:
+                    reselect = (secret.id, secret.resource_ref, secret.resource_name)
+                    secret.resource_ref, secret.resource_name = "", ""
             secret.provider = pending.provider or ""
             secret.authorization_method = pending.authorization_method or ""
             # granted_scopes stays canonically SPACE-joined whatever dialect went over the wire, so the
@@ -533,7 +567,36 @@ async def complete_oauth_connection(
             pending.status, pending.detail = "error", "connection storage failed"
             await db.commit()
             return OAuthCallbackOutcome("exchange_failed")
+    if reselect is not None:
+        await _reselect_after_reconnect(*reselect, org_id=pending.org_id,
+                                        client_factory=client_factory, provider=profile)
     return OAuthCallbackOutcome("connected")
+
+
+async def _reselect_after_reconnect(
+    secret_id: int, resource_ref: str, resource_name: str, *, org_id: int, client_factory,
+    provider,
+) -> None:
+    """Derive the selected resource's call token from a reconnected grant.
+
+    When the new grant no longer reaches the resource, the connection stays on its root token
+    and asks for a new selection instead of keeping a binding with nothing behind it."""
+    try:
+        await select_connection_resource(
+            secret_id=secret_id, resource_ref=resource_ref, resource_name=resource_name,
+            org_id=org_id, client_factory=client_factory,
+        )
+    except Exception as exc:  # noqa: BLE001 - the reconnect already committed; report, don't 500
+        print(f"[oauth] reselecting the resource after reconnect failed: {exc}")
+        async with session_maker() as db:
+            secret = await _owned_connection(secret_id, org_id, db)
+            secret.health_status = "setup_required"
+            secret.health_detail = (
+                f"Reconnected, but the selected {provider.resource_label} is no longer "
+                f"reachable. Select a {provider.resource_label} again."
+            )
+            secret.health_checked_at = _utcnow_naive()
+            await db.commit()
 
 
 async def connect_with_pasted_secret(
@@ -542,6 +605,7 @@ async def connect_with_pasted_secret(
     provider = oauth_providers.get(provider_name)
     if provider is None or not provider.uses_pasted_secret:
         raise ConnectError("invalid_token_provider", "this provider is connected by consent, not a token")
+    _refuse_paused(provider_name)
     token = raw_token.strip()
     if not token:
         raise ConnectError("invalid_token", f"{provider.token_label or 'Token'} is required")
@@ -749,6 +813,13 @@ async def list_connections(*, org_id: int) -> list[dict]:
         out = []
         for s in rows:
             view = connection_refresh.connection_view(s)
+            if oauth_providers.is_paused(s.provider):
+                # Kept and untouched while paused: the dashboard shows this instead of a health error.
+                # Its provider is out of /oauth/providers then, so the name rides on the row itself.
+                view["paused"] = True
+                view["paused_message"] = oauth_providers.paused_message(s.provider)
+                view["provider_display_name"] = getattr(
+                    oauth_providers.get(s.provider), "display_name", s.provider)
             provider = oauth_providers.get(s.provider) if s.provider else None
             if provider is not None:
                 method_name = provider.authorization_method_name(s.authorization_method)
@@ -789,6 +860,7 @@ async def _connection_for_upstream(
     """Load one connection and delegate freshness to the single domain implementation."""
     async with session_maker() as db:
         secret = await _owned_connection(secret_id, org_id, db)
+        _refuse_paused(secret.provider)
         await connection_refresh.ensure_fresh(
             secret, db, HTTPXOAuthRefreshPort(client),
         )
@@ -903,6 +975,8 @@ async def list_connection_resources(
         "provider": provider.service,
         "resource_label": provider.resource_label,
         "resource_plural": provider.resource_plural,
+        # A derived resource token reaches only the selected resource, so no other works per call.
+        "resource_scoped": bool(provider.resource_token_path),
         "selected": selected,
         "resources": resources,
         "setup_required": setup_required,
@@ -1137,6 +1211,7 @@ async def supply_extra_credential(
 ) -> dict:
     async with session_maker() as db:
         secret = await _owned_connection(secret_id, org_id, db)
+        _refuse_paused(secret.provider)
         provider = oauth_providers.get(secret.provider)
         if provider is None or not provider.needs_extra_credential:
             raise ConnectError("no_extra_credential", "this provider needs no extra credential")

@@ -26,14 +26,16 @@ The mechanics:
   (SKILL.md) + its secrets + its tool(s). The proxy *relays, never models* the upstream.
 
 New verified accounts receive $1.00 of signup credit once, when creating an eligible team.
-Additional teams start with no signup credit. Legacy `POST /users` registration does not verify
-an email or grant credit; use email OTP or Google/GitHub sign-in. Existing balances remain usable.
+Additional teams start with no signup credit, and aliases of one inbox (`+tag`, Gmail dots) share
+a single credit. Legacy `POST /users` registration does not verify an email, so its team starts
+at zero and receives the credit when you first sign in with email OTP or Google/GitHub.
+Existing balances remain usable.
 
 ## First: install + sign in
 ```bash
 curl -fsSL {BASE}/install.sh | sh     # installs the CLI + points it here
 treg login                            # browser sign-in (GitHub / Google / email code) — first login registers you
-treg login --email you@company.com    # terminal-only alternative (emailed 6-digit code)
+treg login --email you@company.com    # emailed 6-digit code (falls back to the browser if the server requires a browser check)
 treg login --token <per-org-token>    # non-interactive (agents/CI)
 ```
 Everything runs in your **active org** (after first login, create or join a team). Team invites arrive by
@@ -51,6 +53,8 @@ Everything in this document maps onto them:
   Its `verdict` says what you got: `strong` (these do the job, every provider of it by measured
   success), `closest` (nearest, check `catalog_get`), `none` (not in the catalog: file
   `catalog_request`, do not rephrase), `keyword` (ranked by words alone)
+- "what's new" → `catalog_search` with `added_within_days` (30 is a good default) or `sort: "newest"`;
+  `query` may be empty.
 - "call it" → `call` with the endpoint id, or `<tool-name>/<path>` for one of the team's own tools
 - "check the balance" → `balance`
 - "share feedback" → `feedback`
@@ -71,6 +75,7 @@ generation.
 
 ```bash
 treg catalog search "subreddit posts"            # find endpoints by what they do
+treg catalog search --new                        # tools added in the last 30 days, newest first
 treg catalog get scrapecreators.reddit.subreddit.posts   # params, PRICE, how you'd be served
 treg call scrapecreators.reddit.subreddit.posts --query subreddit=news
 treg balance                                     # the prepaid balance + recent charges
@@ -83,6 +88,11 @@ Notes:
   `treg catalog get` for its fields, parameters and price before choosing. If you need a provider's
   catch-all, disposable, role-address or SMTP field, call that provider's endpoint: the routed
   `treg.people.email.verify` contract defines only `valid`, `status` and `score`.
+- To find AND check an email in one call, send `--header "X-Treg-Route-Verify: true"` on
+  `treg.people.email.find`. The check is its own small charge. Read `_treg.verification.verdict`
+  (`valid`, `invalid`, `catch_all`, `risky`, `unknown`); `checked: false` means no check ran.
+  The same header on `treg.people.phone.find` checks the line live: `live`, `dead` or `unknown`.
+  Never call a phone "verified": a live line is not proof it is this person's number.
 - A catalog endpoint can use a verified public route with no provider key. Such a call is free when
   the caller does not send a provider credential. The team tool or stored provider key still wins.
 - Discovery jobs usually have TWO shapes in the catalog — a structured one (filters: title, location,
@@ -115,11 +125,15 @@ Notes:
   fresh: verbatim provider bytes, `X-Treg-Cache: hit`, `X-Treg-Fetched-At`, `X-Treg-Age`. Your
   team's first call on a question costs full price either way; from your second call on, a hit
   costs 10%, and a hit on your own key is free. `Cache-Control: no-cache` forces a live call;
-  `X-Treg-Max-Age: <seconds>` accepts only a younger answer.
+  `X-Treg-Max-Age: <seconds>` accepts only a younger answer. A team admin can opt the team out
+  of the archive (`treg org archive off`): new calls are then neither answered from nor stored
+  in it, so metered calls lose the repeat price.
 - HTTP **503** `provider_capacity_unavailable` = treg's own account for that provider is out
   (not your balance; nothing charged). Body has `resets_at` and `alternatives` (same capability,
   other providers) — choose one, or use your own key. treg never switches providers for you.
   treg re-checks the provider about once a minute, so a retry after a minute can succeed.
+- HTTP **503** `provider_paused` = this deployment paused that provider (nothing charged, nothing
+  sent). Read `message`. The existing connection is kept; do not reconnect, it works again when resumed.
 - An org tool or secret for the provider always wins over an anonymous route or treg's key,
   automatically — the catalog is the fallback, not a replacement for keys the team already has.
 - **Choosing between providers of one capability — the procedure.** `treg catalog get <id>` lists
@@ -162,10 +176,18 @@ Notes:
     registry these ids answer 404: fall back to the routed endpoints below.
 <!--/hub-->
 <!--routed-->
+  - **For a common job, call the routed tool, not a provider you remember.** Scraping a page
+    (`treg.web.extract`), web search (`treg.web.search`), Google results (`treg.google.serp.organic`,
+    `treg.google.serp.maps`), finding or verifying an email (`treg.people.email.find`,
+    `treg.people.email.verify`) and most social profiles have a `treg.<capability>` tool. treg picks
+    the provider (your own key first), falls back when one fails or misses, and charges only the
+    answer it returns. A provider you used last week may not be the best choice today: prices and
+    reliability change. Name a provider only when you need fields or options that only it has.
   - **Routed endpoints** (`treg.<capability>`, e.g. `treg.people.email.find`) are where you can
     ask treg to choose: POST the identity (`{full_name, domain}` | `{first_name, last_name, domain}` |
     `{linkedin_url}`); treg runs the best child (own keys first, then cheapest per hit), falls back
-    on errors AND misses (cheapest first, within `X-Treg-Route-Max-Cost`, default $1), and returns
+    on errors AND misses (cheapest first, within `X-Treg-Route-Max-Cost`, default $1; a miss can be
+    billed, so a routed row quotes `usd_per_call: null`, not $0 — set the header for bulk runs), and returns
     `{output, raw, _treg.served_by, _treg.tried}` + `X-Treg-Served-By`. `X-Treg-Route-Waterfall: 0`
     stops at the first miss. A filter a provider cannot apply (`country` on a name-only search) is
     still sent to the others, and the answer names it in `X-Treg-Ignored-Filters` / `_treg.ignored_filters`
@@ -231,6 +253,10 @@ How it works:
   task id, a resumable `treg call …` command (Ctrl-C loses the wait, never the task or the money),
   progress, and the result URL. Exit 0 = done, 2 = the provider failed the task, 3 = timed out
   (resume with the printed command).
+- **Some async tools usually answer at once** (an email verification): when the first response is
+  already finished, it is the answer and is charged as one; `--await` prints it without polling. If
+  it says "still working", poll no faster than the descriptor's `interval` and stop at its `max_age`
+  seconds; a task with no answer by then is refunded.
 - **Reference media (a face image, a voice clip, a first frame) must be a public URL the vendor
   can fetch.** Do not reach for a paste host: they fail vendor probes at random (catbox, tmpfiles,
   uguu all did). `treg host face.jpg` prints a public URL (30 MB, 7 days, free) that drops straight

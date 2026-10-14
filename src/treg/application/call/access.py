@@ -26,6 +26,7 @@ from .resolve import (
     _platform_offer,
     _provider_tool_grant,
     _resolve_call,
+    provider_paused,
     resolve_call_target,
 )
 from .route import RouteOptions, build_plan
@@ -45,6 +46,8 @@ async def catalog_endpoint_access(
         )
     _enforce_catalog_status(endpoint)
     service = endpoint["provider"]
+    if oauth_providers.is_paused(service):
+        raise provider_paused(service, endpoint_id)
     if endpoint.get("kind") == "routed":
         return await _routed_access(endpoint, caller, catalog)
 
@@ -227,23 +230,24 @@ async def _direct_access(
     billed_note: str,
 ) -> dict | None:
     probe = provider.base_url.rstrip("/") + "/" + (endpoint["path"] or "/").lstrip("/")
-    try:
-        target = await resolve_call_target(probe, caller, _resolve_call)
-        return {
-            "tier": "tool",
-            "metered": bool(billed_note),
-            "detail": (
-                f"will use this org's registered {target.tool.name!r} tool{billed_note}"
-            ),
-        }
-    except CallFailure as exc:
-        if exc.status_code == 403:
+    for url in provider.tool_lookup_urls(probe):
+        try:
+            target = await resolve_call_target(url, caller, _resolve_call)
             return {
-                "tier": "restricted",
-                "detail": "a registered tool exists but your access is restricted — ask an admin",
+                "tier": "tool",
+                "metered": bool(billed_note),
+                "detail": (
+                    f"will use this org's registered {target.tool.name!r} tool{billed_note}"
+                ),
             }
-        if exc.status_code != 404:
-            raise
+        except CallFailure as exc:
+            if exc.status_code == 403:
+                return {
+                    "tier": "restricted",
+                    "detail": "a registered tool exists but your access is restricted — ask an admin",
+                }
+            if exc.status_code != 404:
+                raise
     if await _marketplace_secret(service, caller.org_id, db) is not None:
         return {
             "tier": "credential",

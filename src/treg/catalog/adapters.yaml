@@ -137,68 +137,88 @@ adapters:
     miss: "data.email == null"
 
   # ---- instagram.user.profile ---------------------------------------------------------------
+  # Instagram users come in GraphQL (edge_*.count) or private API (*_count) shape; read both.
   tikhub.instagram.user.profile:
     accepts: [[username]]
     in:  {username: queryParams.username}
-    out: {username: "coalesce(data.data.user.username, params.username)", user_id: data.data.user.id,
-          full_name: data.data.user.full_name, followers: data.data.user.edge_followed_by.count,
-          following: data.data.user.edge_follow.count, posts_count: data.data.user.edge_owner_to_timeline_media.count,
+    out: {username: "coalesce(data.data.user.username, params.username)",
+          user_id: "coalesce(data.data.user.id, data.data.user.pk)", full_name: data.data.user.full_name,
+          followers: "coalesce(data.data.user.edge_followed_by.count, data.data.user.follower_count)",
+          following: "coalesce(data.data.user.edge_follow.count, data.data.user.following_count)",
+          posts_count: "coalesce(data.data.user.edge_owner_to_timeline_media.count, data.data.user.media_count)",
           is_verified: data.data.user.is_verified, is_private: data.data.user.is_private, biography: data.data.user.biography}
     miss: "data.data.user == null"
   tikhub.x.instagram-v1-fetch-user-info-by-username-v2:
     accepts: [[username]]
     in:  {username: queryParams.username}
-    out: {username: data.username, user_id: data.id, full_name: data.full_name, followers: data.edge_followed_by.count,
-          following: data.edge_follow.count, posts_count: data.edge_owner_to_timeline_media.count,
+    out: {username: data.username, user_id: "coalesce(data.id, data.pk)", full_name: data.full_name,
+          followers: "coalesce(data.edge_followed_by.count, data.follower_count)",
+          following: "coalesce(data.edge_follow.count, data.following_count)",
+          posts_count: "coalesce(data.edge_owner_to_timeline_media.count, data.media_count)",
           is_verified: data.is_verified, is_private: data.is_private, biography: data.biography}
     miss: "data.username == null"
   tikhub.x.instagram-v1-fetch-user-info-by-username-v3:
     accepts: [[username]]
     in:  {username: queryParams.username}
-    out: {username: data.username, user_id: data.id, full_name: data.full_name, followers: data.edge_followed_by.count,
-          following: data.edge_follow.count, posts_count: data.edge_owner_to_timeline_media.count,
+    out: {username: data.username, user_id: "coalesce(data.id, data.pk)", full_name: data.full_name,
+          followers: "coalesce(data.edge_followed_by.count, data.follower_count)",
+          following: "coalesce(data.edge_follow.count, data.following_count)",
+          posts_count: "coalesce(data.edge_owner_to_timeline_media.count, data.media_count)",
           is_verified: data.is_verified, is_private: data.is_private, biography: data.biography}
     miss: "data.username == null"
   tikhub.x.instagram-v1-fetch-user-info-by-id:
     accepts: [[user_id]]
     in:  {user_id: queryParams.user_id}
-    out: {username: data.username, user_id: data.id, full_name: data.full_name, followers: data.edge_followed_by.count,
-          following: data.edge_follow.count, posts_count: data.edge_owner_to_timeline_media.count,
+    out: {username: data.username, user_id: "coalesce(data.id, data.pk)", full_name: data.full_name,
+          followers: "coalesce(data.edge_followed_by.count, data.follower_count)",
+          following: "coalesce(data.edge_follow.count, data.following_count)",
+          posts_count: "coalesce(data.edge_owner_to_timeline_media.count, data.media_count)",
           is_verified: data.is_verified, is_private: data.is_private, biography: data.biography}
     miss: "data.username == null"
   tikhub.x.instagram-v1-fetch-user-info-by-id-v2:
     accepts: [[user_id]]
     in:  {user_id: queryParams.user_id}
-    out: {username: data.username, user_id: data.id, full_name: data.full_name, followers: data.edge_followed_by.count,
-          following: data.edge_follow.count, posts_count: data.edge_owner_to_timeline_media.count,
+    out: {username: data.username, user_id: "coalesce(data.id, data.pk)", full_name: data.full_name,
+          followers: "coalesce(data.edge_followed_by.count, data.follower_count)",
+          following: "coalesce(data.edge_follow.count, data.following_count)",
+          posts_count: "coalesce(data.edge_owner_to_timeline_media.count, data.media_count)",
           is_verified: data.is_verified, is_private: data.is_private, biography: data.biography}
     miss: "data.username == null"
   tikhub.x.instagram-v3-get-user-profile:
     accepts: [[username]]
     in:  {username: queryParams.username}
-    out: {username: data.username, user_id: data.id, full_name: data.full_name, followers: data.follower_count,
-          following: data.following_count, posts_count: data.media_count, is_verified: data.is_verified,
-          is_private: data.is_private, biography: data.biography}
+    out: {username: data.username, user_id: "coalesce(data.id, data.pk)", full_name: data.full_name,
+          followers: "coalesce(data.edge_followed_by.count, data.follower_count)",
+          following: "coalesce(data.edge_follow.count, data.following_count)",
+          posts_count: "coalesce(data.edge_owner_to_timeline_media.count, data.media_count)",
+          is_verified: data.is_verified, is_private: data.is_private, biography: data.biography}
     miss: "data.username == null"
   justoneapi.instagram.user.profile:
     accepts: [[username]]
     in:  {username: queryParams.username}
-    out: {username: data.username, user_id: data.id, full_name: data.full_name, followers: data.edge_followed_by.count,
-          following: data.edge_follow.count, posts_count: data.edge_owner_to_timeline_media.count,
+    out: {username: data.username, user_id: "coalesce(data.id, data.pk)", full_name: data.full_name,
+          followers: "coalesce(data.edge_followed_by.count, data.follower_count)",
+          following: "coalesce(data.edge_follow.count, data.following_count)",
+          posts_count: "coalesce(data.edge_owner_to_timeline_media.count, data.media_count)",
           is_verified: data.is_verified, is_private: data.is_private, biography: data.biography}
     miss: "data.username == null"
   scrapecreators.instagram.user.profile:
     accepts: [[username]]
     in:  {username: queryParams.handle}
-    out: {username: data.user.username, user_id: data.user.pk, full_name: data.user.full_name,
-          followers: data.user.follower_count, following: data.user.following_count, posts_count: data.user.media_count,
+    out: {username: data.user.username, user_id: "coalesce(data.user.id, data.user.pk)", full_name: data.user.full_name,
+          followers: "coalesce(data.user.edge_followed_by.count, data.user.follower_count)",
+          following: "coalesce(data.user.edge_follow.count, data.user.following_count)",
+          posts_count: "coalesce(data.user.edge_owner_to_timeline_media.count, data.user.media_count)",
           is_verified: data.user.is_verified, is_private: data.user.is_private, biography: data.user.biography}
     miss: "data.user.username == null"
   scrapecreators.x.v1-instagram-basic-profile:
     accepts: [[user_id]]
     in:  {user_id: queryParams.userId}
-    out: {username: username, user_id: pk, full_name: full_name, followers: follower_count, following: following_count,
-          posts_count: media_count, is_verified: is_verified, is_private: is_private, biography: biography}
+    out: {username: username, user_id: "coalesce(id, pk)", full_name: full_name,
+          followers: "coalesce(edge_followed_by.count, follower_count)",
+          following: "coalesce(edge_follow.count, following_count)",
+          posts_count: "coalesce(edge_owner_to_timeline_media.count, media_count)",
+          is_verified: is_verified, is_private: is_private, biography: biography}
     miss: "username == null"
   serpapi.x.instagram-profile:
     accepts: [[username]]
@@ -367,6 +387,23 @@ adapters:
     out: {valid: data.valid, phone: data.e164_format, country_code: data.country_code, line_type: data.line_type, carrier: data.carrier}
     miss: "data.valid == null"
 
+  # ---- people.phone.live --------------------------------------------------------------------
+  hlrlookup.people.phone.verify:
+    route: false
+    accepts: [[phone]]
+    in_expr: {body.telephone_number: "e164_digits(phone)",
+              body.usa_status: "choose(starts_with(e164_digits(phone), '1'), 'YES', 'NO')"}
+    const: {body.save_to_cache: PRIVATE, body.cache_days_global: 0, body.cache_days_private: 0}
+    test_identity: {phone: "+447540822872"}
+    out: {live_status: "results[0].live_status", phone: "results[0].detected_telephone_number",
+          line_type: "results[0].telephone_number_type", current_network: "results[0].current_network_details.name",
+          ported: "results[0].is_ported == 'YES'"}
+    # A per-result error is free and says nothing about the line.
+    miss: "at_least(results[0].error != 'NONE', coalesce(results[0].live_status) == null)"
+    # Only LIVE and DEAD are answers about the line; the rest say HLR could not tell.
+    verdicts: {absent_subscriber: unknown, no_teleservice_provisioned: unknown, not_available_network_only: unknown,
+               no_coverage: unknown, inconclusive: unknown, not_applicable: unknown}
+
   # ---- people.email.verify ------------------------------------------------------------------
   dropleads.people.email.verify:
     accepts: [[email]]
@@ -387,12 +424,14 @@ adapters:
     # unknown as uncharged; treating it as a miss lets the existing generic success settlement
     # release the hold and lets a routed waterfall continue.
     miss: "coalesce(status, 'unknown') == 'unknown'"
+    verdicts: {spamtrap: invalid, abuse: risky, do_not_mail: risky}
   trykitt.people.email.verify:
     accepts: [[email]]
     in: {email: body.email}
     const: {body.realtime: true}
     out: {valid: "validity == 'valid'", status: validity}
     miss: "validity == null"
+    verdicts: {catchall: catch_all}
   contactout.people.email.verify:
     accepts: [[email]]
     in: {email: queryParams.email}
@@ -401,19 +440,24 @@ adapters:
     # Require both a successful envelope and a nonempty verdict, using existing expressions.
     # at_least takes the maximum of the two predicates (0/1): either failure is a miss.
     miss: "at_least(status_code != 200, coalesce(data.status) == null)"
+    verdicts: {accept_all: catch_all}
   millionverifier.people.email.verify:
     accepts: [[email]]
     in:  {email: queryParams.email}
     out: {valid: "result == 'ok'", status: result}
     # Like peer verifiers, risky/invalid verdicts are answers; API errors omit quality.
     miss: "quality == null"
+    verdicts: {ok: valid, disposable: risky, unverified: unknown}
   bounceban.people.email.verify:
     accepts: [[email]]
     in: {email: queryParams.email}
     out: {valid: "result == 'deliverable'", status: result, score: score}
-    # A standard submission can return status=verifying before the verdict exists. It was billed,
-    # but it is not a routed answer yet, so the existing waterfall may continue.
+    # A status=verifying submission is waited for (the endpoint's `async` block) and judged on
+    # its finished answer, so this rule sees only finished answers: one without a verdict is a miss.
     miss: "result == null"
+    # BounceBan reports a catch-all domain as a flag next to `risky`.
+    verdict: "choose(is_accept_all == true, choose(result == 'risky', 'catch_all', result), result)"
+    verdicts: {deliverable: valid, undeliverable: invalid}
   leadmagic.people.email.verify:
     accepts: [[email]]
     in:  {email: body.email}
@@ -424,16 +468,20 @@ adapters:
     in:  {email: queryParams.email}
     out: {valid: "data.email.status == 'valid'", status: data.email.status, score: data.email.score}
     miss: "data.email.status == null"
+    verdicts: {accept_all: catch_all}
   hunter.people.email.verify:
     accepts: [[email]]
     in:  {email: queryParams.email}
     out: {valid: "data.status == 'valid'", status: data.status, score: data.score}
     miss: "data.status == null"
+    verdicts: {accept_all: catch_all, webmail: unknown, disposable: risky}
   limadata.people.email.verify:
     accepts: [[email]]
     in: {email: body.email}
     out: {valid: "result == 'Valid'", status: result, score: score}
     miss: "result == null"
+    # LimaData reports a catch-all domain as a flag next to `Risky`.
+    verdict: "choose(is_catch_all == true, choose(result == 'Risky', 'catch_all', result), result)"
 
   # ---- people.enrich ------------------------------------------------------------------------
   dropleads.people.enrich:
@@ -470,6 +518,12 @@ adapters:
     out: {full_name: data.full_name, first_name: data.first_name, last_name: data.last_name, title: data.position,
           company: data.company, company_domain: data.website_url, linkedin_url: data.linkedin, location: data.country}
     miss: "data.full_name == null"
+  oceanio.people.enrich:
+    accepts: [[linkedin_url], [full_name, domain]]
+    in: {linkedin_url: body.person.linkedin, full_name: body.person.name, domain: body.company.domain}
+    out: {full_name: name, first_name: firstName, last_name: lastName, title: jobTitle,
+          company_domain: domain, linkedin_url: linkedinUrl, location: location}
+    miss: "name == null"
   hunter.people.enrich:
     accepts: [[email], [linkedin_handle]]
     in:  {email: queryParams.email, linkedin_handle: queryParams.linkedin_handle}
@@ -634,7 +688,8 @@ adapters:
   dataforseo.x.serp-google-organic-live-advanced:
     accepts: [[q]]
     in:  {q: body.keyword}
-    in_expr: {body.location_code: "dfs_location(country)", body.language_code: language, body.depth: limit}
+    in_expr: {body.location_code: "dfs_location(country)", body.language_code: language, body.depth: limit,
+              body.load_async_ai_overview: "choose(ai_overview, true, null)"}
     body_array: true
     out: {results: "tasks[0].result[0].items", count: "tasks[0].result[0].items_count"}
     miss: "tasks[0].result[0].items == []"
@@ -672,6 +727,15 @@ adapters:
     const: {body.page: 1, body.pageSize: 10}
     out: {companies: items, count: totalItems}
     miss: "items == []"
+  oceanio.companies.lookalike:
+    accepts: [[domain]]
+    in: {domain: body.companiesFilters.lookalikeDomains}
+    in_expr: {body.companiesFilters.lookalikeDomains: "list(domain)"}
+    # The shared key requires an explicit size of 1-100, and size is the whole price.
+    const: {body.size: 10}
+    cost_units: "10"
+    out: {companies: companies, count: total}
+    miss: "companies == []"
 
   # ---- people.search ------------------------------------------------------------------------
   dropleads.people.search:
@@ -724,6 +788,13 @@ adapters:
     const: {body.category: people}
     out: {people: results, count: "len(results)"}
     miss: "results == []"
+  parallel.people.search:
+    accepts: [[q]]
+    in: {q: body.objective}
+    in_expr: {body.objective: "join(q, csv(keywords))", body.match_limit: "at_least(at_most(limit, 100), 5)"}
+    const: {body.entity_type: people}
+    out: {people: entities, count: "len(entities)"}
+    miss: "coalesce(entities, []) == []"
   icypeas.people.search:
     accepts: [[company_domain, title], [company_domain], [title]]
     in:  {company_domain: body.query.currentCompanyWebsite.include, title: body.query.currentJobTitle.include}
@@ -756,6 +827,14 @@ adapters:
     in_expr: {body.filters.contacts.include.jobTitles: "list(title)", body.pagination.size: "at_least(limit, 10)", body.pagination.page: "0"}
     out: {people: results, count: pagination.total}
     miss: "results == []"
+  oceanio.people.search:
+    accepts: [[company_domain]]
+    in: {company_domain: body.companiesFilters.includeDomains}
+    in_expr: {body.companiesFilters.includeDomains: "list(company_domain)",
+              body.size: "at_most(limit, 100)"}
+    cost_units: "at_most(limit, 100)"
+    out: {people: people, count: total, next_cursor: searchAfter}
+    miss: "people == []"
 
   apollo.people.enrich:
     accepts: [[email], [linkedin_url], [full_name, domain]]
@@ -1056,6 +1135,22 @@ adapters:
     const: {body.category: company}
     out: {companies: results, count: "len(results)"}
     miss: "results == []"
+  parallel.companies.search:
+    accepts: [[q]]
+    in: {q: body.objective}
+    in_expr: {body.match_limit: "at_least(at_most(limit, 100), 5)"}
+    const: {body.entity_type: companies}
+    out: {companies: entities, count: "len(entities)"}
+    miss: "coalesce(entities, []) == []"
+  oceanio.companies.search:
+    # Domain only: industries take Ocean.io's exact vocabulary (free text is a false miss) and
+    # technologies is an object, not a list.
+    accepts: [[domain]]
+    in: {domain: body.companiesFilters.includeDomains}
+    in_expr: {body.companiesFilters.includeDomains: "list(domain)", body.size: "at_most(limit, 100)"}
+    cost_units: "at_most(limit, 100)"
+    out: {companies: companies, count: total, next_cursor: searchAfter}
+    miss: "companies == []"
   hunter.x.discover-companies:
     accepts: [[q]]
     in:  {q: body.query}
@@ -1120,8 +1215,9 @@ adapters:
     miss: "data == []"
   tomba.companies.search.reveal:
     accepts: [[industry]]
-    in:  {industry: body.filters.industry, country: body.filters.country}
-    in_expr: {body.filters: "obj('country', list(country), 'industry', list(industry))", body.page: "1"}
+    # each filter is {include: [...]} and country is `location_country`; the old flat shape is ignored
+    in:  {industry: body.filters.industry.include, country: body.filters.location_country.include}
+    in_expr: {body.filters: "obj('industry', obj('include', list(industry)), 'location_country', obj('include', list(country)))", body.page: "1"}
     out: {companies: data.companies, count: meta.total}
     miss: "data.companies == []"
   thecompaniesapi.companies.search:
@@ -1154,9 +1250,9 @@ adapters:
     accepts: [[q]]
     in:  {q: body.searchStringsArray}
     in_expr: {body.searchStringsArray: "list(q)", body.locationQuery: "country_name(country)", body.language: language}
-    # treg's key needs the run's spend cap, timeout and memory; 20 places bill at most 20 rows + the start.
-    const: {queryParams.maxTotalChargeUsd: "0.25", queryParams.timeout: "90", queryParams.memory: "1024",
-            body.maxCrawledPlacesPerSearch: 20, body.maxCrawledPlaces: 20, body.scrapeContacts: false,
+    # treg's key needs the run's spend cap, timeout and memory; Arena compares ten places.
+    const: {queryParams.maxTotalChargeUsd: "0.12", queryParams.timeout: "90", queryParams.memory: "1024",
+            body.maxCrawledPlacesPerSearch: 10, body.maxCrawledPlaces: 10, body.scrapeContacts: false,
             body.scrapePlaceDetailPage: false, body.maxReviews: 0}
     out: {places: ".", count: "len(.)"}
     miss: ". == []"
@@ -1180,6 +1276,14 @@ adapters:
     in_expr: {queryParams.count: limit}
     out: {videos: data.aweme_list, next_cursor: data.max_cursor, has_more: data.has_more}
     miss: "data.aweme_list == []"
+  tikhub.tiktok.user.videos:
+    # evidence only: its empty itemList on an active account becomes a measured miss; app-v3 already routes the same lookup
+    route: false
+    accepts: [[sec_uid]]
+    in:  {sec_uid: queryParams.secUid}
+    in_expr: {queryParams.count: limit}
+    out: {videos: data.itemList, next_cursor: data.cursor, has_more: data.hasMore}
+    miss: "coalesce(data.itemList, []) == []"
   # tikhub.x.tiktok-app-v3-fetch-user-post-videos-v3: its example carries no aweme_list — v1/v2 cover the same lookup.
 
   # ---- linkedin.user.profile (batch 5) ---------------------------------------------------------
@@ -1247,10 +1351,17 @@ adapters:
   dataforseo.x.serp-google-news-live-advanced:
     accepts: [[q]]
     in:  {q: body.keyword}
-    in_expr: {body.location_code: "dfs_location(country)", body.language_code: language}
+    in_expr: {body.location_code: "dfs_location(country)", body.language_code: language, body.depth: limit}
     body_array: true
     out: {results: "tasks[0].result[0].items", count: "tasks[0].result[0].items_count"}
     miss: "tasks[0].result[0].items == []"
+  litescrape.google.serp.news:
+    accepts: [[q]]
+    in: {q: queryParams.q}
+    in_expr: {queryParams.num: limit, queryParams.hl: language}
+    const: {queryParams.tbm: nws}
+    out: {results: news_results, count: "len(news_results)"}
+    miss: "coalesce(news_results, []) == []"
   serpapi.x.google-news:
     accepts: [[q]]
     in:  {q: queryParams.q}
@@ -1258,6 +1369,19 @@ adapters:
     const: {queryParams.engine: google_news}
     out: {results: news_results}
     miss: "news_results == []"
+  serper.google.serp.news:
+    accepts: [[q]]
+    in: {q: body.q}
+    in_expr: {body.gl: "lower(country)", body.hl: language, body.num: limit}
+    out: {results: news, count: "len(news)"}
+    miss: "coalesce(news, []) == []"
+  cloro.google.serp.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.gl: "upper(country)", body.hl: language}
+    const: {body.pages: 1}
+    out: {results: result.newsResults, count: "len(result.newsResults)"}
+    miss: "coalesce(result.newsResults, []) == []"
 
   # ---- instagram.search.reels (batch 5) --------------------------------------------------------
   justoneapi.x.instagram-search-reels-v1:
@@ -1364,8 +1488,8 @@ adapters:
   justoneapi.x.youtube-search-v1:
     accepts: [[q]]
     in:  {q: queryParams.keyword}
-    out: {videos: data.videos, next_cursor: data.continuation_token}
-    miss: "data.videos == []"
+    out: {videos: "coalesce(data.items, data.videos)", next_cursor: "coalesce(data.nextToken, data.continuation_token)"}
+    miss: "coalesce(data.items, data.videos, []) == []"
   tikhub.youtube.search.videos:
     accepts: [[q]]
     in:  {q: queryParams.keyword}
@@ -2367,10 +2491,11 @@ adapters:
     out: {email: "null_if(data.email, '', 'n/a', 'null', 'none')", first_name: data.first_name, last_name: data.last_name}
     miss: "null_if(data.email, '', 'n/a', 'null', 'none') == null"
   # country_code is the provider's company-context country, not proof of the phone owner's location.
+  # A bare 10-digit number with country US or CA gets its +1, so the routed live check can read it.
   quickenrich.people.phone.find:
     accepts: [[linkedin_url], [first_name, last_name, domain]]
     in: {linkedin_url: queryParams.linkedin_url, first_name: queryParams.first_name, last_name: queryParams.last_name, domain: queryParams.company_url}
-    out: {phone: "null_if(data.employee_phone, '', 'n/a', 'null', 'none')", line_type: "null_if(data.employee_phone_type, '', 'n/a', 'null', 'none')", country_code: "null_if(data.country_code, '', 'n/a', 'null', 'none')"}
+    out: {phone: "with_country_code(null_if(data.employee_phone, '', 'n/a', 'null', 'none'), data.country_code)", line_type: "null_if(data.employee_phone_type, '', 'n/a', 'null', 'none')", country_code: "null_if(data.country_code, '', 'n/a', 'null', 'none')"}
     miss: "null_if(data.employee_phone, '', 'n/a', 'null', 'none') == null"
   quickenrich.people.enrich:
     accepts: [[email]]
@@ -2645,6 +2770,13 @@ adapters:
           followers: output.data.followerCount, connections: output.data.connectionsCount,
           about: output.data.about, linkedin_url: output.data.url}
     miss: "output.found == false"
+  crawl4ai.google.serp.organic:
+    accepts: [[q]]
+    in: {q: queryParams.q}
+    in_expr: {queryParams.country: "lower(country)", queryParams.language: "lower(language)", queryParams.num: "at_most(ceil_to(limit, 10), 100)",
+              queryParams.source: "choose(ai_overview, 'google', null)"}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
   anyapi.google.serp.organic:
     accepts: [[q]]
     in:  {q: body.query}
@@ -2654,7 +2786,7 @@ adapters:
   anyapi.google.serp.news:
     accepts: [[q]]
     in:  {q: body.query}
-    in_expr: {body.gl: "lower(country)", body.hl: language}
+    in_expr: {body.gl: "lower(country)", body.hl: language, body.limit: limit}
     out: {results: output.data.items, count: "len(output.data.items)"}
     miss: "coalesce(output.data.items, []) == []"
   anyapi.google.serp.maps.place:
@@ -2670,12 +2802,72 @@ adapters:
     miss: "coalesce(output.data.suggestions, []) == []"
 
   # ---- open web -----------------------------------------------------------------------------
+  search1api.web.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.max_results: limit}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  tinyfish.web.search.news:
+    accepts: [[q]]
+    in: {q: queryParams.query}
+    const: {queryParams.domain_type: news}
+    out: {results: results, count: "coalesce(total_results, len(results))"}
+    miss: "coalesce(results, []) == []"
+  exa.web.search.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.numResults: limit}
+    const: {body.category: news}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  exa.web.search.publications:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.numResults: limit}
+    const: {body.category: publication}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  tinyfish.web.search.publications:
+    accepts: [[q]]
+    in: {q: queryParams.query}
+    const: {queryParams.domain_type: research_paper}
+    out: {results: results, count: "coalesce(total_results, len(results))"}
+    miss: "coalesce(results, []) == []"
+  serper.google.serp.scholar:
+    accepts: [[q]]
+    in: {q: body.q}
+    out: {results: organic, count: "len(organic)"}
+    miss: "coalesce(organic, []) == []"
   search1api.web.search:
     accepts: [[q]]
     in: {q: body.query}
     in_expr: {body.max_results: limit}
     out: {results: results, count: "len(results)"}
     miss: "coalesce(results, []) == []"
+  diffbot.x.web-search:
+    accepts: [[q]]
+    in: {q: queryParams.text}
+    in_expr: {queryParams.size: limit}
+    test_identity: {q: "knowledge graph AI"}
+    out: {results: search_results, count: "len(search_results)"}
+    miss: "coalesce(search_results, []) == []"
+  # ---- ai-search.perplexity.answer: two sources, said in `source_kind` --------------------------
+  dataforseo.x.ai-optimization-perplexity-llm-responses-live:
+    accepts: [[prompt]]
+    in: {prompt: body.user_prompt}
+    in_expr: {body.web_search_country_iso_code: country}
+    const: {body.model_name: sonar}
+    body_array: true
+    out: {answer: "tasks[0].result[0].items[0].sections[0].text",
+          sources: "tasks[0].result[0].items[0].sections[0].annotations", source_kind: "'model_api'"}
+    miss: "tasks[0].result[0].items[0].sections[0].text == null"
+  cloro.ai-search.perplexity.answer:
+    accepts: [[prompt]]
+    in: {prompt: body.prompt}
+    in_expr: {body.country: country}
+    out: {answer: result.text, sources: result.sources, source_kind: "'website'"}
+    miss: "result.text == null"
   perplexity.web.search.fast:
     accepts: [[q]]
     in: {q: body.query}
@@ -2716,6 +2908,13 @@ adapters:
     const: {body.search_depth: basic, body.include_usage: true}
     out: {results: results, count: "len(results)"}
     miss: "coalesce(results, []) == []"
+  tavily.web.search.news:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.max_results: limit}
+    const: {body.topic: news, body.search_depth: basic, body.include_usage: true}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
   linkup.web.search:
     accepts: [[q]]
     in: {q: body.q}
@@ -2747,9 +2946,34 @@ adapters:
   serper.web.search:
     accepts: [[q]]
     in: {q: body.q}
-    in_expr: {body.gl: "lower(country)", body.hl: language}
+    in_expr: {body.gl: "lower(country)", body.hl: language, body.num: limit}
     out: {results: organic, count: "len(organic)"}
     miss: "coalesce(organic, []) == []"
+  spidercloud.web.search:
+    accepts: [[q]]
+    in: {q: body.search}
+    in_expr: {body.search_limit: limit}
+    const: {body.fetch_page_content: false}
+    out: {results: content, count: "len(content)"}
+    miss: "coalesce(content, []) == []"
+  octen.web.search:
+    accepts: [[q]]
+    in: {q: body.query}
+    in_expr: {body.count: limit}
+    out: {results: data.results, count: "len(data.results)"}
+    miss: "coalesce(data.results, []) == []"
+  parallel.web.search:
+    accepts: [[q]]
+    in_expr: {body.search_queries: "list(q)", body.advanced_settings.max_results: "at_most(limit, 20)"}
+    test_identity: {q: "python requests library", limit: 2}
+    const: {body.mode: fast}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  crawl4ai.web.search:
+    accepts: [[q]]
+    in: {q: queryParams.q}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
   firecrawl.web.search:
     accepts: [[q]]
     in: {q: body.query}
@@ -2767,48 +2991,57 @@ adapters:
     accepts: [[url]]
     in: {url: body.url}
     out: {pages: "list(results)", count: "len(list(results))"}
-    miss: "results == null"
+    miss: "coalesce(results.content, '') == ''"
   you.web.contents:
     accepts: [[url]]
     in_expr: {body.urls: "list(url)"}
     test_identity: {url: "https://example.com"}
     const: {body.formats: [markdown]}
     out: {pages: ".", count: "len(.)"}
-    miss: ". == []"
+    miss: "coalesce([0].markdown, '') == ''"
   tinyfish.web.fetch:
     accepts: [[url]]
     in_expr: {body.urls: "list(url)"}
     test_identity: {url: "https://example.com"}
     const: {body.format: markdown, body.links: true, body.ttl: 0}
     out: {pages: results, count: "len(results)"}
-    miss: "coalesce(results, []) == []"
+    miss: "coalesce(results[0].text, '') == ''"
   exa.web.contents.get:
     accepts: [[url]]
     in_expr: {body.urls: "list(url)"}
     test_identity: {url: "https://en.wikipedia.org/wiki/Hierarchical_navigable_small_world"}
     const: {body.text: true}
     out: {pages: results, count: "len(results)"}
-    miss: "coalesce(results, []) == []"
+    miss: "coalesce(results[0].text, '') == ''"
+  parallel.web.extract:
+    accepts: [[url]]
+    in_expr: {body.urls: "list(url)"}
+    test_identity: {url: "https://example.com"}
+    const: {body.advanced_settings.full_content: true}
+    out: {pages: results, count: "len(results)"}
+    # One page decides alone. With several, an explicitly empty usage[] is the free miss; an
+    # absent usage field is unobserved and keeps the base-price fallback.
+    miss: "choose(results[1] == null, coalesce(results[0].full_content, results[0].excerpts, '') == '', usage == [])"
   olostep.web.scrape:
     accepts: [[url]]
     in: {url: body.url_to_scrape}
     const: {body.formats: [markdown], body.max_age: 604800}
     out: {pages: "list(result)", count: "len(list(result))"}
-    miss: "result == null"
+    miss: "coalesce(result.markdown_content, '') == ''"
   scrapegraphai.web.scrape:
     accepts: [[url]]
     in: {url: body.url}
     test_identity: {url: "https://example.com"}
     const: {body.formats: [{type: markdown}], body.allowedTypes: [text/html]}
     out: {pages: "results.markdown.data", count: "len(results.markdown.data)"}
-    miss: "coalesce(results.markdown.data, []) == []"
+    miss: "coalesce(results.markdown.data[0], '') == ''"
   tavily.web.extract:
     accepts: [[url]]
     in_expr: {body.urls: "list(url)"}
     test_identity: {url: "https://example.com"}
     const: {body.extract_depth: basic}
     out: {pages: results, count: "len(results)"}
-    miss: "coalesce(results, []) == []"
+    miss: "coalesce(results[0].raw_content, '') == ''"
   linkup.web.fetch:
     accepts: [[url]]
     in: {url: body.url}
@@ -2821,25 +3054,58 @@ adapters:
     in: {url: queryParams.url}
     const: {queryParams.live: false}
     out: {pages: "list(.)", count: "len(list(.))"}
-    miss: ". == null"
+    miss: "coalesce(content, '') == ''"
   serper.web.extract:
     accepts: [[url]]
     in: {url: body.url}
     const: {body.includeMarkdown: true}
     out: {pages: "list(.)", count: "len(list(.))"}
     miss: "coalesce(text, '') == ''"
+  anyapi.web.scrape:
+    accepts: [[url]]
+    in: {url: body.url}
+    test_identity: {url: "https://example.com"}
+    const: {body.formats: [markdown], body.onlyMainContent: false}
+    out: {pages: "list(output.data)", count: "len(list(output.data))"}
+    miss: "coalesce(output.data.markdown, '') == ''"
+  crawl4ai.web.extract.structured:
+    accepts: [[url, schema, instruction], [url, schema], [url, instruction]]
+    in: {url: body.url, schema: body.schema, instruction: body.instruction}
+    out: {data: data}
+    miss: "data == null"
+  linkup.web.fetch.structured:
+    accepts: [[url, schema, instruction], [url, schema]]
+    in: {url: body.url, schema: body.schema}
+    in_expr: {body.instructions: instruction}
+    const: {body.mode: standard, body.renderJs: false}
+    out: {data: data}
+    miss: "data == null"
+  search1api.web.extract.structured:
+    accepts: [[url, schema, instruction], [url, schema]]
+    in: {url: body.url}
+    in_expr: {body.prompt: instruction, body.response_format: "obj('type', 'json_schema', 'json_schema', schema)"}
+    test_identity: {url: "https://example.com", instruction: "Extract the page title.",
+                    schema: {type: object, properties: {title: {type: string}}, required: [title]}}
+    out: {data: results}
+    miss: "results == null"
+  crawl4ai.web.scrape:
+    accepts: [[url]]
+    in: {url: body.url}
+    const: {body.format: md}
+    out: {pages: "list(.)", count: "len(list(.))"}
+    miss: "coalesce(markdown, '') == ''"
   firecrawl.web.scrape:
     accepts: [[url]]
     in: {url: body.url}
     const: {body.formats: [markdown], body.parsers: []}
     out: {pages: "list(data)", count: "len(list(data))"}
-    miss: "coalesce(data.markdown, '') == null"
+    miss: "coalesce(data.markdown, '') == ''"
   branddev.web.scrape:
     accepts: [[url]]
     in: {url: body.url}
     const: {body.formats: {markdown: true}}
     out: {pages: "list(.)", count: "len(list(.))"}
-    miss: "markdown.success == false"
+    miss: "coalesce(markdown.data, '') == ''"
 
   search1api.web.sitemap:
     accepts: [[url]]
@@ -2877,7 +3143,7 @@ adapters:
     accepts: [[url]]
     in_expr: {queryParams.domain: "host(url)"}
     test_identity: {url: "https://docs.context.dev"}
-    const: {queryParams.maxLinks: "10"}
+    in: {limit: queryParams.maxLinks}
     out: {results: urls, count: "len(urls)"}
     miss: "coalesce(urls, []) == []"
 
@@ -3006,3 +3272,170 @@ adapters:
     cost_units: "at_most(limit, 10)"
     out: {companies: results, count: total_result_count}
     miss: "results == []"
+
+  # ---- judge-only: scrape, search and Google organic tools outside the routed jobs -------------
+  # `route: false`: these never join `treg.web.extract` / `treg.web.search` / `treg.google.serp.organic`;
+  # their `miss` judges each answer's hit verdict so `empty_is_failure` holds for every provider
+  # of those capabilities, not only the routed ones.
+  litescrape.web.fetch:
+    route: false
+    accepts: [[url]]
+    in: {url: queryParams.url}
+    out: {pages: "list(.)", count: "len(list(.))"}
+    miss: "coalesce(content, '') == ''"
+  scrapegraphai.web.extract:
+    route: false
+    accepts: [[url]]
+    in: {url: body.url}
+    out: {pages: "list(json)", count: "len(list(json))"}
+    miss: "json == null"
+  valyu.web.contents:
+    route: false
+    accepts: [[url]]
+    in_expr: {body.urls: "list(url)"}
+    test_identity: {url: "https://example.com"}
+    out: {pages: results, count: "len(results)"}
+    miss: "coalesce(results[0].content, '') == ''"
+  limadata.web.extract:
+    route: false
+    accepts: [[url]]
+    in_expr: {body.urls: "list(url)"}
+    test_identity: {url: "https://example.com"}
+    out: {pages: results, count: "len(results)"}
+    miss: "coalesce(results[0].content, '') == ''"
+  spidercloud.web.scrape:
+    route: false
+    accepts: [[url]]
+    in: {url: body.url}
+    out: {pages: ".", count: "len(.)"}
+    miss: "coalesce([0].content, '') == ''"
+  crawl4ai.web.search.rich:
+    route: false
+    accepts: [[q]]
+    in: {q: queryParams.q}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  parallel.web.search.advanced:
+    route: false
+    accepts: [[q]]
+    in_expr: {body.search_queries: "list(q)"}
+    test_identity: {q: "python requests library"}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  perplexity.web.search:
+    route: false
+    accepts: [[q]]
+    in: {q: body.query}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  scrapegraphai.web.search.extract:
+    route: false
+    accepts: [[q]]
+    in: {q: body.query}
+    out: {results: results, count: "len(results)"}
+    miss: "coalesce(results, []) == []"
+  you.web.search.highlights:
+    route: false
+    accepts: [[q]]
+    in: {q: body.query}
+    out: {results: results.web, count: "len(results.web)"}
+    miss: "coalesce(results.web, []) == []"
+  you.web.search.full_page.cache:
+    route: false
+    accepts: [[q]]
+    in: {q: body.query}
+    out: {results: results.web, count: "len(results.web)"}
+    miss: "coalesce(results.web, []) == []"
+  cloro.google.serp.organic:
+    route: false
+    accepts: [[q]]
+    in: {q: body.query}
+    out: {results: result.organicResults, count: "len(result.organicResults)"}
+    miss: "coalesce(result.organicResults, []) == []"
+  limadata.google.serp.organic:
+    route: false
+    accepts: [[q]]
+    in: {q: body.query}
+    out: {results: organic, count: "len(organic)"}
+    miss: "coalesce(organic, []) == []"
+  litescrape.google.serp.organic:
+    route: false
+    accepts: [[q]]
+    in: {q: queryParams.q}
+    out: {results: organic_results, count: "len(organic_results)"}
+    miss: "coalesce(organic_results, []) == []"
+  serpstat.google.serp.organic:
+    route: false
+    accepts: [[q]]
+    in: {q: body.params.keyword}
+    const: {body.id: "1", body.method: SerpstatKeywordProcedure.getKeywordTop, body.params.se: g_us, body.params.size: 3}
+    out: {results: result.data.top, count: "len(result.data.top)"}
+    miss: "coalesce(result.data.top, []) == []"
+  octen.web.extract:
+    route: false
+    accepts: [[url]]
+    in_expr: {body.urls: "list(url)"}
+    test_identity: {url: "https://example.com"}
+    out: {pages: data.results, count: "len(data.results)"}
+    miss: "coalesce(data.results[0].full_content, data.results[0].highlights, '') == ''"
+
+  # ---- Crawl4AI recipes (POST /recipes/{name}: {rows: [...]}) --------------------------------
+  crawl4ai.google.serp.maps:
+    accepts: [[q]]
+    in: {q: body.query}
+    out: {places: rows, count: "len(rows)"}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.instagram.user.profile:
+    accepts: [[username]]
+    in: {username: body.username}
+    out: {username: "rows[0].username", user_id: "rows[0].user_id", full_name: "rows[0].full_name",
+          followers: "rows[0].followers", following: "rows[0].following", posts_count: "rows[0].posts",
+          is_verified: "rows[0].is_verified", is_private: "rows[0].is_private", biography: "rows[0].biography"}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.instagram.user.posts:
+    accepts: [[username]]
+    in: {username: body.username}
+    out: {posts: rows}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.instagram.user.reels:
+    accepts: [[username], [user_id]]
+    in: {username: body.username, user_id: body.user_id}
+    out: {reels: rows}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.tiktok.user.profile:
+    accepts: [[username]]
+    in: {username: body.username}
+    out: {username: "rows[0].username", user_id: "rows[0].user_id", sec_uid: "rows[0].sec_uid",
+          nickname: "rows[0].nickname", followers: "rows[0].followers", following: "rows[0].following",
+          likes: "rows[0].likes", videos_count: "rows[0].videos", is_verified: "rows[0].verified",
+          biography: "rows[0].bio"}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.tiktok.user.videos:
+    accepts: [[sec_uid]]
+    in: {sec_uid: body.account}
+    out: {videos: rows}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.x.user.profile:
+    accepts: [[username]]
+    in: {username: body.username}
+    out: {username: "rows[0].username", user_id: "rows[0].user_id", name: "rows[0].name",
+          followers: "rows[0].followers", following: "rows[0].following", posts_count: "rows[0].tweets",
+          is_verified: "rows[0].verified", description: "rows[0].bio"}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.facebook.user.posts:
+    accepts: [[url]]
+    in: {url: body.page}
+    out: {posts: rows}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.youtube.channel.profile:
+    accepts: [[channel_id]]
+    in: {channel_id: body.channel}
+    out: {name: "rows[0].title", channel_id: "rows[0].channel_id", handle: "rows[0].handle",
+          description: "rows[0].description", subscribers: "rows[0].subscribers",
+          videos_count: "rows[0].videos", country: "rows[0].country"}
+    miss: "coalesce(rows, []) == []"
+  crawl4ai.youtube.video.comments:
+    accepts: [[video_id]]
+    in: {video_id: body.video}
+    out: {comments: rows}
+    miss: "coalesce(rows, []) == []"

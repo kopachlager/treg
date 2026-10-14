@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
-from .config import platform_setting_name, get_settings
+from .config import PRIMARY_SLOT, platform_setting_name, get_settings
 from .domain.connections import authorization as connection_authorization
 
 
@@ -105,6 +105,9 @@ class OAuthProvider:
     # perfectly well-scoped token.
     token_scopes_header: str = ""
     base_url: str = ""  # upstream API root, so a successful connect can auto-provision the tool
+    # Earlier base_urls. A team tool registered on one still wins a catalog call (tier 1) and
+    # relays to its own base_url; only treg's routing moved.
+    legacy_base_urls: tuple[str, ...] = ()
     # A provider's catalog can span additional API roots. These roots are executable policy, not
     # catalog data: a YAML `host` only selects an exact entry from this allow-list, so a catalog
     # edit cannot redirect an injected team or platform credential to an arbitrary host.
@@ -205,7 +208,7 @@ class OAuthProvider:
     # TIER 4 ONLY: settings attribute holding treg's own second credential for platform-served
     # calls, when the extra credential is PER-USER (extra_credential_setting stays empty so a
     # user's connect never rides treg's half of the pair — Tomba rejects a mismatched key/secret).
-    # `_platform_bindings` appends it as a second header binding; user connections are untouched.
+    # `platform_bindings` appends it as a second header binding; user connections are untouched.
     platform_extra_setting: str = ""
 
     # Some providers bill the OWNER OF THE APP per use, whoever's token made the call — X moved to
@@ -415,6 +418,13 @@ class OAuthProvider:
             if value := getattr(target, field):
                 overrides[field] = value
         return replace(self, **overrides)
+
+    def tool_lookup_urls(self, url: str) -> list[str]:
+        """`url`, then the same path on each legacy base: where a team's own tool may be registered."""
+        base = self.base_url.rstrip("/")
+        if not url.startswith(base + "/"):
+            return [url]
+        return [url] + [old.rstrip("/") + url[len(base):] for old in self.legacy_base_urls]
 
     def authorization_method_name(self, stored: str) -> str:
         return connection_authorization.method_name(self, stored)
@@ -979,9 +989,15 @@ FACEBOOK = OAuthProvider(
     discover_label_field="name",
     discover_extra_path="/me/businesses?fields=owned_pages{id,name},client_pages{id,name}",
     discover_extra_list_paths=_META_BIZ_PAGE_LISTS,
-    # /me returns the person, not the Page, and needs no extra scope — so it keeps working even for
-    # a connection whose Page was later unassigned, which is exactly when you want the probe to
-    # still distinguish "credential dead" from "asset gone".
+    # Every Page edge rejects the user token (code 190 / subcode 2069032). Picking the Page derives
+    # its Page token from the same listings, and calls inject that; the user token stays for the
+    # picker. One connection therefore acts on one Page.
+    call_token_field="page_access_token",
+    resource_token_path="/me/accounts?fields=id,access_token",
+    resource_token_extra_path="/me/businesses?fields=owned_pages{id,access_token},client_pages{id,access_token}",
+    resource_token_extra_list_paths=_META_BIZ_PAGE_LISTS,
+    # /me needs no extra scope. It returns the person before a Page is selected and the Page after,
+    # so it answers for whichever token the tool injects.
     probe_path="/me?fields=id,name",
 )
 
@@ -1967,7 +1983,10 @@ TIKHUB = OAuthProvider(
     client_id_setting="", client_secret_setting="",
     category="Social media",
     summary="Read TikTok, Instagram, YouTube, X and more social platforms through one unified API.",
-    base_url="https://api.tikhub.io",
+    # The enterprise node serves the same API and keys; only there does an account's higher RPS
+    # level take effect (api.tikhub.io caps every key lower).
+    base_url="https://api-node-enterprise.tikhub.io",
+    legacy_base_urls=("https://api.tikhub.io",),
     docs_url="https://docs.tikhub.io/",
     probe_path="/api/v1/tikhub/user/get_user_info",  # account info — the natural key check
 )
@@ -2590,6 +2609,35 @@ OCTEN = OAuthProvider(
     probe_deferred_statuses=(400,),
 )
 
+PARALLEL = OAuthProvider(
+    service="parallel",
+    display_name="Parallel",
+    auth_kind="key",
+    token_label="API key",
+    token_placeholder="your Parallel API key",
+    token_header="x-api-key",
+    token_format="{secret}",
+    setup_url="https://platform.parallel.ai",
+    setup_action_label="Get your Parallel API key",
+    setup_steps=(
+        "Sign in to the Parallel Platform and open API Keys.",
+        "Create or copy a key.",
+    ),
+    setup_note=(
+        "Search, Extract and Entity Search spend your Parallel balance. Connecting reads "
+        "the free monitor count, which spends nothing."
+    ),
+    auth_uri="", token_uri="",
+    scopes={},
+    client_id_setting="", client_secret_setting="",
+    category="SEO",
+    summary="Search the web, extract pages, and find people or companies from a description.",
+    base_url="https://api.parallel.ai",
+    docs_url="https://docs.parallel.ai/getting-started/overview",
+    # Free read: a bogus key answers 401 {"code":16,"message":"Invalid API key (C.1)"}.
+    probe_path="/v1/monitors/stats",
+)
+
 LINKUP = OAuthProvider(
     service="linkup",
     display_name="Linkup",
@@ -2801,6 +2849,37 @@ FIRECRAWL = OAuthProvider(
     base_url="https://api.firecrawl.dev",
     docs_url="https://docs.firecrawl.dev/introduction",
     probe_path="/v2/team/credit-usage",
+)
+
+CRAWL4AI = OAuthProvider(
+    service="crawl4ai",
+    display_name="Crawl4AI",
+    auth_kind="key",
+    token_label="API key",
+    token_placeholder="sk_live_…",
+    # Bearer, not the also-accepted `x-api-key`, matching every Crawl4AI doc example. A bogus or
+    # missing key answers 401 {"error": "sign in"} on the probe (live 2026-10-05).
+    token_header="Authorization",
+    token_format="Bearer {secret}",
+    setup_url="https://api.crawl4ai.com/dashboard/",
+    setup_action_label="Get your Crawl4AI API key",
+    setup_steps=(
+        "Open the Crawl4AI dashboard and click Get a key (a 7-day pass key is issued at once).",
+        "Verify your email for a permanent key and the signup credit, then copy it.",
+    ),
+    setup_note=(
+        "Scrape, search, extract, answer, batch, jobs and recipes spend Crawl4AI credits "
+        "(1 credit = $0.001; a page already in its archive costs half). "
+        "Connecting checks the free balance endpoint."
+    ),
+    auth_uri="", token_uri="",
+    scopes={},
+    client_id_setting="", client_secret_setting="",
+    category="SEO",
+    summary="Scrape any page to clean Markdown, search the web, and extract typed JSON from pages.",
+    base_url="https://api.crawl4ai.com",
+    docs_url="https://api.crawl4ai.com/docs",
+    probe_path="/v1/billing/balance",  # free: reads the credit balance, spends nothing
 )
 
 SPIDERCLOUD = OAuthProvider(
@@ -3057,15 +3136,15 @@ TOMBA = OAuthProvider(
     token_placeholder="your Tomba API key (ta_…)",
     token_header="X-Tomba-Key",
     token_format="{secret}",
-    # The SECOND half of Tomba's credential pair. Without it only three routes answer.
+    # The SECOND half of Tomba's credential pair. Without it only the email-count route answers.
     extra_credential_label="API secret",
     extra_credential_header="X-Tomba-Secret",
     extra_credential_setting="",  # deliberately unset — see the note above
     platform_extra_setting="platform_key_tomba_secret",  # tier 4 injects treg's OWN pair
     extra_credential_note=(
         "Tomba signs every request with two values. Paste the API key above, then add your API "
-        "secret (ts_…) from the same page — without it only the usage, email-format and "
-        "email-count routes will answer."
+        "secret (ts_…) from the same page — without it only the email-count route will "
+        "answer."
     ),
     setup_url="https://app.tomba.io/api",
     setup_action_label="Get your Tomba API key and secret",
@@ -3088,14 +3167,10 @@ TOMBA = OAuthProvider(
     ),
     base_url="https://api.tomba.io",
     docs_url="https://docs.tomba.io/api",
-    # /v1/usage is free, answers the KEY ALONE (so connect-time verification works before the
-    # secret is bound), and rejects a bogus key. Observed live 2026-08-20:
-    #   valid key  -> 200 {"data":[{"id":…,"search":0,"verifier":0,…}], "total":{…}}
-    #   bogus key  -> 400 {"errors":{"type":"authentication_failed",
-    #                                "message":"Please enter a valid KEY.","code":400}}
-    # A non-2xx is enough, so no token_verify_field / token_reject_field is needed. Do NOT probe
-    # /v1/me or /v1/account: /v1/me 400s without the secret (and its body leaks the account's
-    # secret_token), and /v1/account 401s with "Invalid or expired JWT" even for a good pair.
+    # /v1/usage is free but now needs the PAIR: a key alone 400s the same whether it is real or
+    # bogus, so a 400 defers verification until the secret is added. Do NOT probe /v1/me (its body
+    # leaks the account's secret_token) or /v1/account (401 "Invalid or expired JWT" for a good pair).
+    probe_deferred_statuses=(400,),
     probe_path="/v1/usage",
 )
 
@@ -3126,6 +3201,49 @@ TRESTLEIQ = OAuthProvider(
     # fixture returned 200. Trestle bills the probe as one Phone Validation query.
     probe_path="/3.0/phone_intel?phone=%2B13005550100&is_sandbox=true",
     probe_cost_micro=15_000,
+)
+
+HLRLOOKUP = OAuthProvider(
+    service="hlrlookup",
+    display_name="HLR Lookup",
+    auth_kind="key",
+    token_label="API key",
+    token_placeholder="your HLR Lookup API key",
+    token_location="json",
+    token_param="api_key",
+    token_format="{secret}",
+    extra_credential_label="API secret",
+    extra_credential_location="json",
+    extra_credential_param="api_secret",
+    platform_extra_setting="platform_key_hlrlookup_secret",
+    extra_credential_note=(
+        "HLR Lookup authenticates every request with an API key and an API secret in the JSON "
+        "body. Add the secret after the key; treg injects both values server-side."
+    ),
+    setup_url="https://www.hlrlookup.com/",
+    setup_action_label="Get your HLR Lookup API key and secret",
+    setup_steps=(
+        "Sign in to HLR Lookup and open the API settings in your account.",
+        "Copy BOTH the API key and the API secret. Paste the key here, then add the secret.",
+    ),
+    setup_note=(
+        "A live lookup of a mobile number spends one credit, two for a US mobile with usa_status. "
+        "Landlines, numbers without coverage, bad formats and errors are free. The balance check "
+        "treg uses to verify the pair is free."
+    ),
+    auth_uri="", token_uri="", scopes={}, client_id_setting="", client_secret_setting="",
+    category="Enrichment",
+    summary="Check whether a mobile number is live on its network right now, and which network serves it.",
+    base_url="https://api.hlrlookup.com",
+    docs_url="https://www.hlrlookup.com/knowledge",
+    # Free. POST /apiv2/balance answers 200 {"Status":"OK","Credits":…} for a valid pair and 401
+    # {"error":"UNAUTHORIZED"} when either half is wrong. The key alone always answers 400
+    # BAD_REQUEST, valid or not, so the first connect step stores the key unchecked until the secret
+    # is added; it is never labelled verified from that partial probe.
+    probe_path="/apiv2/balance",
+    probe_method="POST",
+    probe_json={},
+    probe_deferred_statuses=(400,),
 )
 
 
@@ -3841,11 +3959,11 @@ REGISTRY: dict[str, OAuthProvider] = {
         TIKHUB, BRIGHTDATA, SEMRUSH, JUSTONEAPI,
         SCRAPECREATORS,
         # SEO API-key providers
-        DATAFORSEO, SERANKING, MOZ, MAJESTIC, SERPSTAT, EXA, SEARCH1API, TAVILY, OCTEN, LINKUP, YOU, VALYU, KEENABLE, OLOSTEP, FIRECRAWL, SPIDERCLOUD, PERPLEXITY,
+        DATAFORSEO, SERANKING, MOZ, MAJESTIC, SERPSTAT, EXA, SEARCH1API, TAVILY, OCTEN, LINKUP, PARALLEL, YOU, VALYU, KEENABLE, OLOSTEP, FIRECRAWL, CRAWL4AI, SPIDERCLOUD, PERPLEXITY,
         SCRAPEGRAPHAI, SERPER, LITESCRAPE, CLORO,
         # more Enrichment API-key providers
         LUSHA, CORESIGNAL, DIFFBOT, THECOMPANIESAPI, LEADMAGIC, ENRICHLAYER, FIBER_AI, CRUSTDATA, AVIATO,
-        COMPANYENRICH, OCEANIO, ADYNTEL, TOMBA, TRESTLEIQ, PREDICTLEADS, FINDYMAIL, BRANDDEV, ICYPEAS, LEADSFORGE,
+        COMPANYENRICH, OCEANIO, ADYNTEL, TOMBA, TRESTLEIQ, HLRLOOKUP, PREDICTLEADS, FINDYMAIL, BRANDDEV, ICYPEAS, LEADSFORGE,
         INFLUENCERSCLUB,
         # Market data API-key providers
         COINGECKO, POLYGON, FINNHUB, TWELVEDATA, FMP, EODHD, MARKETSTACK, TIINGO,
@@ -3866,6 +3984,43 @@ CATEGORY_ORDER = ("AI generation", "SEO", "Advertising", "Social media", "Enrich
 
 def get(service: str) -> OAuthProvider | None:
     return REGISTRY.get(service)
+
+
+def is_paused(service: str | None) -> bool:
+    """Whether this deployment has paused `service` (TREG_PAUSED_PROVIDERS). A paused provider is
+    hidden from search and connect and refused at call time; its connections are kept untouched."""
+    return bool(service) and service.strip().lower() in get_settings().paused_providers_set
+
+
+def paused_message(service: str) -> str:
+    provider = REGISTRY.get(service)
+    return get_settings().paused_provider_message(
+        service, provider.display_name if provider else service)
+
+
+def paused_listing() -> dict[str, dict]:
+    """Every paused provider with its name and message, for the dashboard (`/meta`): `listing()`
+    leaves them out, and a page reached by a link or a catalog row still has to say why."""
+    return {service: {"display_name": getattr(REGISTRY.get(service), "display_name", service),
+                      "message": paused_message(service)}
+            for service in sorted(get_settings().paused_providers_set)}
+
+
+def paused_detail(service: str, endpoint_id: str | None = None) -> dict:
+    """The typed body every paused refusal carries: calls, connects and catalog_get alike."""
+    return {"error": "provider_paused", "provider": service,
+            **({"endpoint_id": endpoint_id} if endpoint_id else {}),
+            "message": paused_message(service)}
+
+
+def legacy_aliases(url: str) -> list[str]:
+    """The same call on each legacy base of the provider that serves `url` (empty for most). A
+    deny rule a team wrote against the old host still covers calls on the new one."""
+    for provider in REGISTRY.values():
+        if provider.legacy_base_urls:
+            if len(urls := provider.tool_lookup_urls(url)) > 1:
+                return urls[1:]
+    return []
 
 
 def credentials(provider: OAuthProvider) -> tuple[str, str]:
@@ -4097,7 +4252,7 @@ def listing() -> list[dict]:
         # Grouped first, alphabetical within a shelf — so the dashboard can render the shelves by
         # walking the list once instead of re-sorting what the registry already knows.
         for p in sorted(
-            REGISTRY.values(),
+            (p for p in REGISTRY.values() if not is_paused(p.service)),
             key=lambda p: (
                 CATEGORY_ORDER.index(p.category) if p.category in CATEGORY_ORDER else len(CATEGORY_ORDER),
                 p.display_name,
@@ -4109,19 +4264,25 @@ def listing() -> list[dict]:
 # Moved from api.py (2026-08-27) so BOTH callers — the relay path in api and the archive's
 # refresh worker — reach the ONE authoritative builder without the worker importing api
 # (the routers→api import boundary forbids that chain).
-def platform_bindings(provider) -> list[dict]:
+def platform_bindings(provider, account: str | None = None) -> list[dict]:
     """Tier 4's injection: the SAME header/param shape a pasted key of this provider gets
     (`_provider_bindings`), except the value is named rather than carried — `relay` reads
     `platform_setting` from settings at call time. That is the whole security model: treg's key is
     never written to a Secret row (unreadable by the tenant, unexportable by a local run, and
-    `api.py`'s cross-org secret check would reject it anyway)."""
+    `api.py`'s cross-org secret check would reject it anyway).
+
+    `token_encode` is carried for HTTP Basic providers so the injector can ensure Base64 encoding,
+    matching `_provider_bindings` for tiers 1/2. `account` names which of treg's accounts for the
+    provider the relay injects (`application/call/keyslots.py`); the primary is the deployment's
+    own fields and carries none."""
     setting = platform_setting_name(provider.service)
+    encode_attr = {"token_encode": provider.token_encode} if provider.token_encode else {}
     if provider.token_location in {"query", "json"}:
         bindings = [{"platform_setting": setting, "injector": "env", "location": provider.token_location,
-                     "name": provider.token_param, "format": provider.token_format}]
+                     "name": provider.token_param, "format": provider.token_format, **encode_attr}]
     else:
         bindings = [{"platform_setting": setting, "injector": "env", "location": "header",
-                     "name": provider.token_header, "format": provider.token_format}]
+                     "name": provider.token_header, "format": provider.token_format, **encode_attr}]
     # Keep tier 4 protocol-identical to BYOK. Required provider headers are constants, but they
     # still use the same platform setting reference so the normal binding validator and injector
     # own the whole shape. Crustdata's x-api-version pin is the first provider that needs this.
@@ -4137,4 +4298,6 @@ def platform_bindings(provider) -> list[dict]:
                          "location": provider.extra_credential_location,
                          "name": provider.extra_credential_name,
                          "format": "{secret}"})
+    if account not in (None, PRIMARY_SLOT):
+        bindings = [{**b, "account": f"{provider.service}/{account}"} for b in bindings]
     return bindings

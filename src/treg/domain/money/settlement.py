@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from ..asynctasks import json_path as _path
@@ -153,8 +154,10 @@ def derive_basis(
         return {"when": "terminal" if terminal else "response", "amount": amount,
                 "fallback_micro": fallback,
                 "reserve_micro": reserve}
+    # A fixed per-call price on an async task is owed for the finished answer: the hold waits for
+    # it, and a task that never finishes is released like any other.
     return {
-        "when": "response",
+        "when": "terminal" if terminal and cost.get("type") == "per_call" else "response",
         "amount": {"kind": "observed"},
         "fallback_micro": max(0, int(response_estimate_micro)),
         "reserve_micro": max(0, int(response_estimate_micro)),
@@ -162,6 +165,9 @@ def derive_basis(
 
 
 def _usage_number(value: object) -> float | None:
+    # A plain decimal string ("0.500") counts too.
+    if isinstance(value, str) and re.fullmatch(r"\d+(?:\.\d+)?", value.strip()):
+        value = float(value)
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) \
             and value >= 0:
         return float(value)

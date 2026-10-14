@@ -118,6 +118,15 @@ def at_least(v: Any, floor: Any) -> Any:
         return floor
 
 
+def ceil_to(v: Any, step: Any) -> Any:
+    """Round a caller's limit UP to a provider's step (results come in pages of 10): 25 -> 30."""
+    try:
+        s = int(step)
+        return max(s, -(-int(v) // s) * s)
+    except (TypeError, ValueError):
+        return step
+
+
 def at_most(v: Any, ceiling: Any) -> int:
     """Cap a provider's page size while keeping the routed quote at that same maximum."""
     try:
@@ -156,8 +165,37 @@ def email_domain(v: Any) -> str | None:
     return None if d in _FREE_MAIL else d
 
 
-_FREE_MAIL = {"gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "live.com",
-              "aol.com", "proton.me", "protonmail.com", "me.com", "msn.com", "qq.com", "163.com", "126.com"}
+# Mailboxes anyone can open (global and regional free mail, ISP mail, common disposable and alias services):
+# their domain says nothing about the person's company.
+_FREE_MAIL = frozenset({
+    # global free mail
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com",
+    "ymail.com", "rocketmail.com", "aol.com", "aim.com", "icloud.com", "me.com", "mac.com",
+    "proton.me", "protonmail.com", "protonmail.ch", "pm.me", "tutanota.com", "tuta.io", "zoho.com",
+    "zohomail.com", "gmx.com", "gmx.net", "mail.com", "email.com", "hey.com", "fastmail.com",
+    "yandex.com", "yandex.ru", "ya.ru", "mail.ru", "inbox.ru", "list.ru", "bk.ru", "rambler.ru",
+    # regional free mail
+    "qq.com", "foxmail.com", "163.com", "126.com", "yeah.net", "sina.com", "sina.cn", "sohu.com",
+    "aliyun.com", "139.com", "naver.com", "daum.net", "hanmail.net", "nate.com", "yahoo.co.jp",
+    "yahoo.co.uk", "yahoo.fr", "yahoo.de", "yahoo.es", "yahoo.it", "yahoo.com.br", "yahoo.co.in",
+    "hotmail.co.uk", "hotmail.fr", "hotmail.de", "hotmail.it", "hotmail.es", "outlook.de", "outlook.fr",
+    "outlook.es", "outlook.jp", "live.co.uk", "live.fr", "web.de", "gmx.de", "gmx.at", "gmx.ch",
+    "t-online.de", "freenet.de", "orange.fr", "wanadoo.fr", "free.fr", "laposte.net", "sfr.fr",
+    "libero.it", "virgilio.it", "tiscali.it", "seznam.cz", "wp.pl", "onet.pl", "o2.pl", "interia.pl",
+    "uol.com.br", "bol.com.br", "terra.com.br", "rediffmail.com",
+    # ISP mail
+    "comcast.net", "verizon.net", "att.net", "sbcglobal.net", "bellsouth.net", "cox.net", "charter.net",
+    "earthlink.net", "optonline.net", "btinternet.com", "sky.com", "virginmedia.com", "talktalk.net",
+    "shaw.ca", "rogers.com", "sympatico.ca", "bigpond.com", "optusnet.com.au", "xtra.co.nz",
+    # disposable
+    "mailinator.com", "guerrillamail.com", "10minutemail.com", "temp-mail.org", "tempmail.com",
+    "yopmail.com", "trashmail.com", "sharklasers.com", "getnada.com", "dispostable.com",
+    "maildrop.cc", "throwawaymail.com", "mohmal.com", "emailondeck.com", "fakeinbox.com",
+    # forwarding aliases: a real company's site, but anyone can get an address there
+    "duck.com", "privaterelay.appleid.com", "mozmail.com", "relay.firefox.com", "simplelogin.com",
+    "simplelogin.co", "simplelogin.fr", "slmail.me", "aleeas.com", "8alias.com", "addy.io", "anonaddy.com",
+    "anonaddy.me", "passmail.net", "passmail.com", "passinbox.com", "33mail.com",
+})
 
 
 def host(v: Any) -> str | None:
@@ -230,10 +268,47 @@ def choose(condition: Any, when_true: Any, when_false: Any) -> Any:
     return when_true if condition else when_false
 
 
+def e164_digits(v: Any) -> str | None:
+    """`+44 7790 606023` or `0044…` → `447790606023`; None for a number not written internationally.
+
+    Digits alone are never trusted: a national `6175551212` reads as a `61` (Australian) number."""
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if s.startswith("+"):
+        digits = re.sub(r"\D", "", s)
+    elif s.startswith("00"):
+        digits = re.sub(r"\D", "", s)[2:]
+    else:
+        return None
+    return digits if 7 <= len(digits) <= 15 else None
+
+
+# A national number is trusted only with a country whose numbering plan it fits exactly.
+_NATIONAL_PLANS = {"US": ("1", re.compile(r"[2-9]\d{9}")), "CA": ("1", re.compile(r"[2-9]\d{9}"))}
+
+
+def with_country_code(v: Any, country: Any) -> Any:
+    """`6175550142` or `(617) 555-0142` with country `US` → `+16175550142`; anything else comes back unchanged.
+
+    Only national digits (spaces, `-`, `.` and parentheses aside) that fit the plan of a country in
+    `_NATIONAL_PLANS` are rewritten."""
+    plan = _NATIONAL_PLANS.get(country.strip().upper()) if isinstance(country, str) else None
+    digits = re.sub(r"[\s\-.()]", "", v) if isinstance(v, str) else ""
+    if plan is None or not plan[1].fullmatch(digits):
+        return v
+    return f"+{plan[0]}{digits}"
+
+
+def starts_with(v: Any, prefix: Any) -> bool:
+    return isinstance(v, str) and prefix is not None and v.startswith(str(prefix))
+
+
 TRANSFORMS = {"values": values, "get": get_path, "null_if": null_if, "choose": choose, "split_first": split_first, "split_last": split_last, "join": join, "has_type": has_type, "len": length,
               "dfs_location": dfs_location, "seranking_source": seranking_source, "lower": lower, "upper": upper,
-              "list": as_list, "at_least": at_least, "at_most": at_most, "linkedin_handle": linkedin_handle, "linkedin_url": linkedin_url,
-              "email_domain": email_domain, "host": host, "fmt": fmt, "obj": obj, "tca_filter": tca_filter, "csv": csv, "country_name": country_name}
+              "list": as_list, "at_least": at_least, "at_most": at_most, "ceil_to": ceil_to, "linkedin_handle": linkedin_handle, "linkedin_url": linkedin_url,
+              "email_domain": email_domain, "host": host, "fmt": fmt, "obj": obj, "tca_filter": tca_filter, "csv": csv, "country_name": country_name,
+              "e164_digits": e164_digits, "starts_with": starts_with, "with_country_code": with_country_code}
 
 _CALL = re.compile(r"^(\w+)\((.*)\)$")
 _DIV = re.compile(r"^(.+?)\s*/\s*(\d+(?:\.\d+)?)$")

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, PositiveInt, field_validator
+from pydantic import Field, PositiveInt, field_validator, model_validator
 from urllib.parse import urlsplit
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,6 +28,57 @@ PUBLIC_HOST_ALIASES: tuple[str, ...] = ("treg.superdesign.dev", "treg.to")
 # Deliberately one-way — only ever the pre-move name, never treg.to — so a browser that cached the
 # old→new 301 can never meet a new→old redirect and loop, even while a rollback is in effect.
 LEGACY_PUBLIC_HOSTS: tuple[str, ...] = ("treg.superdesign.dev",)
+
+
+PRIMARY_SLOT = "primary"
+_SLOT_LABEL = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+@dataclass(frozen=True)
+class PlatformSlot:
+    """One treg-owned account behind a provider. `slot` is the operator's label for it (the
+    deployment's own `platform_key_<provider>` is `primary`), never a credential: it is what durable
+    rows, buckets and telemetry name. A label survives reordering the accounts and regenerating an
+    account's key; removing one retires everything created on it."""
+
+    slot: str
+    # setting name -> value; empty for the primary, whose are the fields. Credentials: never in repr.
+    values: Mapping[str, str] = field(repr=False)
+
+    def value(self, setting: str) -> str:
+        return self.values.get(setting, "")
+
+
+@lru_cache
+def _parse_platform_pools(raw: str) -> dict[str, dict[str, dict[str, str]]]:
+    """`TREG_PLATFORM_ACCOUNTS` parsed: {provider: {label: account settings}}. Every account names
+    its provider's `platform_key_<provider>` and only non-empty `platform_*` settings."""
+    if not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        raise ValueError("platform_accounts must be a JSON object") from None
+    if not isinstance(parsed, dict):
+        raise ValueError("platform_accounts must be a JSON object")
+    if len({provider.lower() for provider in parsed}) != len(parsed):
+        raise ValueError("platform_accounts names a provider twice (provider names are case-insensitive)")
+    pools: dict[str, dict[str, dict[str, str]]] = {}
+    for provider, accounts in parsed.items():
+        primary = platform_setting_name(provider)
+        if not isinstance(accounts, dict) or not all(
+                isinstance(label, str) and _SLOT_LABEL.fullmatch(label) and label != PRIMARY_SLOT
+                and isinstance(a, dict) and a.get(primary)
+                and all(isinstance(k, str) and k.startswith("platform_")
+                        and isinstance(v, str) and v.strip() for k, v in a.items())
+                for label, a in accounts.items()):
+            raise ValueError(
+                f"platform_accounts[{provider!r}] must map account labels (lowercase, not "
+                f"{PRIMARY_SLOT!r}) to objects that each name {primary} and only non-empty "
+                "platform_* settings")
+        pools[provider.lower()] = {label: {k: v.strip() for k, v in a.items()}
+                                   for label, a in accounts.items()}
+    return pools
 
 
 def platform_setting_name(provider: str) -> str:
@@ -53,8 +107,15 @@ def _blocked_email_domains(raw: str) -> frozenset[str]:
     )
 
 
+# How treg introduces itself to a provider: on every call on its shared key (the relay's rewrite 5)
+# and as the default of the clients it calls providers with, never a library's own default.
+TREG_USER_AGENT = "treg/1.0 (+https://treg.to)"
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="TREG_", extra="ignore")
+    # Most of these values are credentials: a validation error names the field, never the value.
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="TREG_", extra="ignore",
+                                      hide_input_in_errors=True)
 
     review_sample_rate: float = Field(default=0, ge=0, le=1)
     feedback_hint_rate: float = Field(default=0, ge=0, le=1)
@@ -63,6 +124,61 @@ class Settings(BaseSettings):
     review_budget_per_hour: int = Field(default=5, ge=1)
     # The shared key-value store (Redis protocol). Empty = an in-process fallback; see infra/kv.py.
     kv_url: str = ""
+
+    # Root Web requests only; shared across keys/processes through Redis. Enabling requires
+    # an explicit outage policy. Unlisted and exempt orgs retain their existing behavior.
+    org_concurrency_enabled: bool = False
+    org_concurrency_limits: dict[int, int] = Field(default_factory=dict)
+    org_concurrency_exempt_org_ids: list[int] = Field(default_factory=list)
+    org_concurrency_redis_failure: Literal["fail_open", "fail_closed"] | None = None
+    org_concurrency_lease_s: float = Field(default=30, ge=3, le=300)
+    org_concurrency_retry_after_s: int = Field(default=1, ge=1, le=60)
+
+    @field_validator("org_concurrency_limits", mode="before")
+    @classmethod
+    def _org_concurrency_limits(cls, value):
+        if not isinstance(value, dict) or any(
+            not (type(org) is int and org > 0
+                 or isinstance(org, str) and re.fullmatch(r"[1-9][0-9]*", org))
+            or type(limit) is not int or limit <= 0
+            for org, limit in value.items()
+        ):
+            raise ValueError("org_concurrency_limits must map positive org IDs to positive integer limits")
+        if len({int(org) for org in value}) != len(value):
+            raise ValueError("org_concurrency_limits contains duplicate org IDs")
+        return value
+
+    @field_validator("org_concurrency_exempt_org_ids", mode="before")
+    @classmethod
+    def _org_concurrency_exemptions(cls, value):
+        if not isinstance(value, list) or any(type(org) is not int or org <= 0 for org in value):
+            raise ValueError("org_concurrency_exempt_org_ids must be a list of positive integer org IDs")
+        return value
+
+    @model_validator(mode="after")
+    def _org_concurrency_configuration(self):
+        if self.org_concurrency_enabled:
+            if self.org_concurrency_redis_failure is None:
+                raise ValueError("enabled org concurrency requires an explicit org_concurrency_redis_failure")
+            if not self.kv_url.strip():
+                raise ValueError("enabled org concurrency requires shared Redis via kv_url")
+            try:
+                url = urlsplit(self.kv_url)
+                valid = (url.scheme in {"redis", "rediss"} and bool(url.hostname)
+                         or url.scheme == "unix" and bool(url.path))
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError("enabled org concurrency requires a valid Redis kv_url")
+        return self
+
+    # Optional same-org admission in front of a balance session (settlement, reserve, release).
+    # A lease expiry or an unavailable store still runs the database path. A reserve or release
+    # with no positive org id refuses before checkout; that refusal is not an HTTP 429.
+    money_admission_enabled: bool = False
+    money_admission_org_ids: list[PositiveInt] = Field(default_factory=list)
+    money_admission_wait_s: float = Field(default=5.0, gt=0, le=120)
+    money_admission_lease_s: float = Field(default=15.0, ge=3, le=300)
 
     # SQLite locally, Postgres on Render — same code path, just swap the URL.
     database_url: str = "sqlite+aiosqlite:///./treg.db"
@@ -166,6 +282,10 @@ class Settings(BaseSettings):
     spool_max_bytes: int = Field(default=64 * 1024 * 1024, ge=1)
     spool_budget_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
     spool_parse_concurrency: int = Field(default=2, ge=1, le=16)
+    # Fair share of a provider's concurrency on treg's own keys (domain/capacity/fair_share.py):
+    # how long a call waits in line for a place before a routed job moves on and a direct call is
+    # refused, not charged. 0 turns the gate off (TREG_FAIR_SHARE_WAIT_S=0).
+    fair_share_wait_s: float = Field(default=2.0, ge=0, le=30)
 
     # ---- referral program (referrals.py) --------------------------------------------------------
     # Flat bounties, not a percentage of top-ups. At 0% platform margin a percentage would be a
@@ -259,6 +379,8 @@ class Settings(BaseSettings):
     platform_key_tomba: str = ""          # the API key (ta_…); X-Tomba-Key header
     platform_key_tomba_secret: str = ""   # the API secret (ts_…); X-Tomba-Secret — BOTH must be set
     platform_key_trestleiq: str = ""       # raw key; exact lowercase x-api-key header
+    platform_key_hlrlookup: str = ""         # JSON body api_key; prepaid lookup credits, 1 per mobile lookup
+    platform_key_hlrlookup_secret: str = ""  # JSON body api_secret paired with it — BOTH must be set
     # (tomba's data routes need the header pair; TOMBA.platform_extra_setting names this second slot)
     platform_key_influencersclub: str = ""  # Bearer key (dashboard JWT); creator discovery + enrichment, fx.yaml $0.598/credit (our $299/500 plan)
     platform_key_crustdata: str = ""  # Bearer key; every call also needs the pinned x-api-version header
@@ -269,12 +391,14 @@ class Settings(BaseSettings):
     platform_key_search1api: str = ""  # Bearer; prepaid credits, free GET /usage balance check
     platform_key_octen: str = ""      # x-api-key; PAYG search and extraction usage settles per response
     platform_key_linkup: str = ""     # Bearer; prepaid USD balance, request-priced Search/Fetch/Research
+    platform_key_parallel: str = ""   # x-api-key; USD balance, Search/Extract settle from usage SKUs
     platform_key_you: str = ""        # X-API-Key; prepaid USD balance across You.com web APIs
     platform_key_valyu: str = ""      # X-API-Key; subscription credits shared across Valyu APIs
     platform_key_serper: str = ""     # X-API-KEY; prepaid Google search credits, exact charge in response.credits
     platform_key_litescrape: str = ""  # Bearer; prepaid calls, free key status endpoint
     platform_key_keenable: str = ""   # X-API-Key; $4/1,000-request package, 10 requests/s per organization
     platform_key_olostep: str = ""    # Bearer; prepaid credits, platform price $0.002/credit
+    platform_key_crawl4ai: str = ""
     platform_key_firecrawl: str = ""  # Bearer; Standard plan credits, priced at the public base-plan rate
     platform_key_scrapegraphai: str = ""  # SGAI-APIKEY; credit balance and bounded v2 web tools
     platform_key_spidercloud: str = ""   # Bearer; PAYG USD balance, only priced routes may use shared key
@@ -313,6 +437,11 @@ class Settings(BaseSettings):
     # happens to hold a key can't start spending it by accident. `TREG_PLATFORM_PROVIDERS=""` in the
     # Render dashboard turns the whole feature off without a redeploy.
     platform_providers: str = ""
+    # More treg-owned accounts behind a provider, by label (rules: `_parse_platform_pools`):
+    # {"tomba": {"b": {"platform_key_tomba": "...", "platform_key_tomba_secret": "..."}}}.
+    # `platform_key_<provider>` above stays the `primary` account and the only one every reader
+    # outside the call path uses; the call path spreads platform calls across all of them.
+    platform_accounts: str = ""
     # Whether DISCOVERY steers to routed rows: `treg.<capability>` first in search, and a routed
     # parent pulled in whenever one of its children matched. `off` leaves every routed endpoint
     # callable and priced — only the steering stops, and search looks as it did before routing
@@ -359,6 +488,30 @@ class Settings(BaseSettings):
     # the wait, so the timeout is looser than an agent's search. Rate limits bound anonymous use.
     find_candidates: int = 60
     find_timeout_s: float = 6.0
+    # The first-run onboarding (application/onboarding/, docs/context/interface/onboarding.md). Off
+    # = the dashboard keeps the team-name welcome dialog. On, a new user's setup looks them up
+    # (GitHub, their company, their homepage), asks the LLM for task inputs grounded in what it
+    # found and the judge (Jev, a catalog endpoint) to rank and check them. Every key below is
+    # optional: a missing one skips its step and the task falls back to its labelled example.
+    onboarding_v2: bool = False
+    # Off for everyone else, on for these: comma-separated addresses or `@domain`s.
+    onboarding_v2_emails: str = ""
+    # The experiment: a new user whose address is not free, ISP, alias or school mail is offered to the
+    # dashboard's PostHog flag `onboarding-v2`, whose `test` arm gets this flow and `control` the
+    # team-name modal. Off = nobody outside the two settings above sees the flow.
+    onboarding_v2_experiment: bool = False
+    # A member token of treg's own house team: the lookup's catalog calls (company record, homepage,
+    # input checks) are ordinary metered calls on that team, never on the new user's credit.
+    onboarding_treg_token: str = ""
+    # The registry that token belongs to; empty = this one (`public_url`).
+    onboarding_treg_url: str = ""
+    # Any GitHub token; only the public commit-search and user APIs are read with it.
+    onboarding_github_token: str = ""
+    # Through the Vercel AI Gateway's OpenAI-compatible API, keyed by `ai_gateway_api_key`.
+    onboarding_llm_model: str = "anthropic/claude-haiku-4-5-20251001"
+    # What one signup's lookup may spend on the house team, in micro-USD; past it the remaining
+    # checks are skipped.
+    onboarding_max_house_micro: int = 50_000
     # Which find answers: `v1` (endpoint recall, above), `v2` (recall by job: a unit per capability,
     # every vendor listed once the job fits; docs/context/architecture/find.md), or `shadow` (v1 is
     # served, v2 runs beside it and is only logged). One setting is the rollout and the rollback.
@@ -442,7 +595,11 @@ class Settings(BaseSettings):
     # agent bills a card all night". Cap is per calendar month, cooldown is between attempts, and
     # max_attempts counts CONSECUTIVE failures before auto-top-up disables itself.
     autotopup_monthly_cap_usd: int = 100
+    # The wait after a FAILED charge. After a successful one the wait is one hour divided by the
+    # team's `autotopup_max_per_hour` (default below): one charge an hour left teams that spend more
+    # than their refill per hour empty for the rest of the hour, with auto top-up ON.
     autotopup_cooldown_s: int = 3600
+    autotopup_default_per_hour: int = 5
     autotopup_max_attempts: int = 3
 
     # Call-time SSRF guard on the proxy: resolve the upstream host and refuse an internal target. On by
@@ -507,6 +664,11 @@ class Settings(BaseSettings):
     # default so every merge along the way changes nothing users see; production flips it once
     # the whole hub has landed on main.
     hub_enabled: bool = False
+    # Web Arena is shown only after reviewed tests exist for all live tasks.
+    web_arena_enabled: bool = False
+    web_arena_jev_user_daily_cap: int = 20
+    web_arena_jev_ops_daily_cap: int = 1000
+    web_arena_fact_model: str = "openai/gpt-4o-mini"
     # With the hub on, a comma-separated list of team slugs that may use it; EMPTY means every
     # team. The middle stage between "off" and "open": the owner's own team tries the live hub on
     # production first (decided 2026-09-24). Pages that have no caller (the share page, the
@@ -578,6 +740,28 @@ class Settings(BaseSettings):
     # signs user_hash for identity verification and must never reach the browser.
     intercom_app_id: str = ""
     intercom_secret: str = ""
+    # Where the client address comes from (client_ip.py). A header only the edge can set wins
+    # (`cf-connecting-ip` behind Cloudflare); else the entry this many hops from the RIGHT of
+    # X-Forwarded-For, the one the nearest trusted proxy appended (0 = clients connect directly,
+    # use the socket peer). The first X-Forwarded-For entry is client-written and never trusted.
+    client_ip_header: str = ""
+    trusted_proxy_hops: int = Field(default=1, ge=0, le=5)
+    # Comma-separated `treg.extensions` entry-point names that must be installed (policy.py), so a
+    # deployment that relies on a private policy extension refuses to start without it. Empty =
+    # load whatever is installed, which for a plain install is nothing.
+    required_extensions: str = ""
+    # Cloudflare Turnstile on the email sign-in form. Both keys empty = OFF, so self-hosted
+    # instances load no widget and call no Cloudflare. The site key is public (sent to the
+    # browser through /captcha.js); the secret only ever reaches siteverify. `observe` records each
+    # outcome and changes nothing; `enforce` refuses a code to a missing or invalid token and
+    # withholds signup credit from a new account when Cloudflare could not answer.
+    turnstile_site_key: str = ""
+    turnstile_secret: str = ""
+    # Comma-separated frontend hostnames a token must have been solved on. Empty = the host of
+    # public_url. List every host the dashboard is served from (aliases included), never localhost
+    # in production.
+    turnstile_hostnames: str = ""
+    turnstile_mode: Literal["observe", "enforce"] = "observe"
     # Registry OAuth apps for the non-Google providers (oauth_providers.py). Empty = that provider
     # is listed as unconfigured rather than failing part-way through a consent.
     # treg's own Google Ads developer token, from OUR approved manager account. Ads needs it on
@@ -609,6 +793,15 @@ class Settings(BaseSettings):
     # read their campaign data, and the two must not share a credential or a consent screen. Empty
     # = the whole feature is OFF. See docs/context/architecture/ads-conversions.md.
     ads_conv_refresh_token: str = ""
+    # Enhanced Conversions for Leads. OFF: the outbox only ever holds click-attributed teams and the
+    # upload carries click ids alone (the pre-2026-09 shape). ON: every human-owned team's signup,
+    # first call and first payment is queued, and each upload event also carries the SHA-256 of the
+    # team creator's normalised email as a `userData` identifier, so Google can match a conversion
+    # to a signed-in viewer who watched or clicked an ad on ANOTHER device (a YouTube pre-roll on a
+    # phone, the signup on a laptop) — the journey a click id can never connect. Turn on only after
+    # the Ads account has accepted the Customer Data Terms and enabled Enhanced conversions for
+    # leads; until then Google rejects the identifiers and the rows would dead-letter.
+    ads_conv_user_data: bool = False
 
     linkedin_client_id: str = ""
     linkedin_client_secret: str = ""
@@ -633,6 +826,15 @@ class Settings(BaseSettings):
     # Comma-separated registry review keys that do not yet have production access. Remove one key
     # when its review is approved; set an explicit empty value when all reviews are complete.
     oauth_review_pending: str = "instagram-login,page-messages"
+    # Comma-separated provider service ids this deployment has paused (TREG_PAUSED_PROVIDERS), e.g.
+    # one whose upstream access this deployment's app has lost. A paused provider leaves catalog
+    # search and the connect listing, and its calls and connects are refused with a typed 503
+    # `provider_paused` before any hold or upstream request. Existing connections are kept as they
+    # are and work again once the id is removed. Empty (the default) pauses nothing.
+    paused_providers: str = ""
+    # Optional JSON object {service: message} (TREG_PAUSED_PROVIDER_MESSAGES) replacing the default
+    # paused message for a service. Malformed JSON fails at boot rather than showing nothing.
+    paused_provider_messages: str = ""
     # Advertising OAuth platforms — unset by default, so these providers list as "not configured"
     # until this deployment registers its own developer app on each network.
     microsoft_ads_client_id: str = ""
@@ -679,6 +881,25 @@ class Settings(BaseSettings):
             email, sep, digest = part.partition("=")
             if not sep or "@" not in email or not re.fullmatch(r"[0-9a-fA-F]{64}", digest.strip()):
                 raise ValueError("fixed_login_codes entries must be email=<64-hex sha256>")
+        return v
+
+    @field_validator("paused_provider_messages")
+    @classmethod
+    def _paused_provider_messages_shape(cls, v: str) -> str:
+        if v.strip():
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                raise ValueError("paused_provider_messages must be a JSON object") from None
+            if not isinstance(parsed, dict) or not all(
+                    isinstance(k, str) and isinstance(m, str) and m.strip() for k, m in parsed.items()):
+                raise ValueError("paused_provider_messages must map service ids to non-empty strings")
+        return v
+
+    @field_validator("platform_accounts")
+    @classmethod
+    def _platform_accounts_shape(cls, v: str) -> str:
+        _parse_platform_pools(v)  # raises ValueError on a malformed value
         return v
 
     @property
@@ -753,6 +974,40 @@ class Settings(BaseSettings):
         """
         return (provider or "").lower() in self.platform_provider_set
 
+    def platform_slots(self, provider: str) -> tuple[PlatformSlot, ...]:
+        """Every treg-owned account behind `provider`, the primary first; empty without a primary
+        key. Says nothing about the allow-list: `platform_key_for` stays the serving switch."""
+        setting = platform_setting_name(provider)
+        primary = getattr(self, setting, "") or ""
+        if not primary:
+            return ()
+        return (PlatformSlot(PRIMARY_SLOT, {}),
+                *self.platform_extra_accounts().get((provider or "").lower(), ()))
+
+    def platform_extra_accounts(self) -> dict[str, tuple[PlatformSlot, ...]]:
+        """`TREG_PLATFORM_ACCOUNTS` by provider, whether or not the primary key is set."""
+        return {provider: tuple(PlatformSlot(label, values) for label, values in sorted(accounts.items()))
+                for provider, accounts in _parse_platform_pools(self.platform_accounts).items()}
+
+    def platform_credential(self, setting: str, account: str | None) -> str:
+        """The value a `platform_setting` binding injects. Without an account, the deployment's
+        own field: the primary account. With one (`<provider>/<label>`), that account's value, or
+        "" when it is not configured: another account's credential would act on objects that exist
+        only on the named one."""
+        if account is None:
+            return getattr(self, setting, "") or ""
+        provider, _, label = account.partition("/")
+        values = _parse_platform_pools(self.platform_accounts).get(provider, {}).get(label, {})
+        return values.get(setting, "")
+
+    def platform_credential_values(self, setting: str) -> tuple[str, ...]:
+        """Every value `setting` holds across treg's accounts: what error-body masking hides."""
+        own = (getattr(self, setting, "") or "").strip()
+        pooled = (values.get(setting, "")
+                  for accounts in _parse_platform_pools(self.platform_accounts).values()
+                  for values in accounts.values())
+        return tuple(dict.fromkeys(v for v in (own, *pooled) if v))
+
     def platform_key_for(self, provider: str) -> str | None:
         """treg's own key for `provider`, or None if tier 4 must not serve it. BOTH conditions have to
         hold — the provider is allow-listed AND a key is configured — so neither half alone can start
@@ -785,6 +1040,22 @@ class Settings(BaseSettings):
         return frozenset(
             key.strip().lower() for key in self.oauth_review_pending.split(",") if key.strip()
         )
+
+    @property
+    def paused_providers_set(self) -> frozenset[str]:
+        """Provider service ids this deployment has paused."""
+        return frozenset(
+            key.strip().lower() for key in self.paused_providers.split(",") if key.strip()
+        )
+
+    def paused_provider_message(self, service: str, display_name: str) -> str:
+        """What a caller or a user is told about a paused provider."""
+        if self.paused_provider_messages.strip():
+            custom = json.loads(self.paused_provider_messages).get(service)
+            if custom:
+                return custom.strip()
+        return (f"{display_name} is temporarily paused on treg. Your existing connection is saved "
+                "and starts to work again when it is resumed. No action is needed from you.")
 
     @property
     def expose_dev_code(self) -> bool:

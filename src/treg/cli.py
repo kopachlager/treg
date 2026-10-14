@@ -42,6 +42,7 @@ from urllib.parse import parse_qsl, quote, urlsplit
 import httpx
 
 from . import agents as _agents
+from . import jsontext
 from .feedback_contract import FEEDBACK_CATEGORIES, FEEDBACK_DESCRIPTION, REVIEW_USEFULNESS, REVIEW_DESCRIPTION
 # One source of truth for the proxy's default port (help text below). Importing the module is cheap —
 # it pulls only stdlib plus httpx, which the CLI already has; `cryptography` stays lazy inside it.
@@ -376,6 +377,9 @@ def _show_hint_line(resp: httpx.Response) -> None:
     kind = headers.get("X-Treg-Hint")
     if kind is None and headers.get("X-Treg-Review") == "requested":
         kind = "review"
+    if routed := headers.get("X-Treg-Routed-Tool"):
+        print(f"treg: {routed} does this job and picks the provider, with fallback; "
+              "prefer it unless you need options only this provider has.", file=sys.stderr)
     if not call_id:
         return
     if kind == "review":
@@ -439,6 +443,11 @@ def cmd_config(args, cfg) -> None:
                       "active_org": cfg.get("active_org"), "logged_in": bool(cfg.get("token"))}, indent=2))
 
 
+def _wants_browser_check(r) -> bool:
+    """The email-code start was refused for want of a browser check (the server's Turnstile)."""
+    return r.status_code == 400 and r.headers.get("X-Treg-Captcha") == "required"
+
+
 def cmd_login(args, cfg) -> None:
     if args.token:  # agent / CI: a token directly (a per-org token, or a dashboard identity token)
         # A typed human Default/bootstrap is still an identity credential and may participate in
@@ -473,25 +482,30 @@ def cmd_login(args, cfg) -> None:
         base = cfg["base_url"].rstrip("/")
         h = {"ngrok-skip-browser-warning": "1", "X-Treg-Key-Protocol": "1"}
         r = httpx.post(f"{base}/auth/email/start", json={"email": args.email}, headers=h, timeout=15)
-        if r.status_code >= 400:
+        if _wants_browser_check(r):
+            # A terminal cannot pass the server's browser check (Turnstile), so this sign-in
+            # finishes through the browser handshake below instead.
+            print("This server only emails sign-in codes to a browser. Continuing in the browser…")
+        elif r.status_code >= 400:
             _show(r)
             return
-        d = r.json()
-        print(f"(dev) your code is: {d['dev_code']}" if d.get("dev_code")
-              else f"We sent a 6-digit code to {args.email}.")
-        code = input("Enter code: ").strip()
-        r = httpx.post(f"{base}/auth/email/verify", json={"email": args.email, "code": code}, headers=h, timeout=15)
-        if r.status_code >= 400:
-            _show(r)
+        else:
+            d = r.json()
+            print(f"(dev) your code is: {d['dev_code']}" if d.get("dev_code")
+                  else f"We sent a 6-digit code to {args.email}.")
+            code = input("Enter code: ").strip()
+            r = httpx.post(f"{base}/auth/email/verify", json={"email": args.email, "code": code}, headers=h, timeout=15)
+            if r.status_code >= 400:
+                _show(r)
+                return
+            d = r.json()
+            cfg.update(token=d["token"], email=d["email"], identity=True)
+            _save_config(cfg)  # persist the freshly-minted token BEFORE the optional org lookup
+            _pick_active_org(cfg, pin=False)
+            _pin_token_to_active_org(cfg, session_cookies=r.cookies)
+            print(f"✓ Logged in as {cfg['email']}. Active org: {cfg.get('active_org')}")
+            _maybe_offer_onboarding(cfg)
             return
-        d = r.json()
-        cfg.update(token=d["token"], email=d["email"], identity=True)
-        _save_config(cfg)  # persist the freshly-minted token BEFORE the optional org lookup
-        _pick_active_org(cfg, pin=False)
-        _pin_token_to_active_org(cfg, session_cookies=r.cookies)
-        print(f"✓ Logged in as {cfg['email']}. Active org: {cfg.get('active_org')}")
-        _maybe_offer_onboarding(cfg)
-        return
     # Browser handshake (register-or-login) — the /login page reuses an existing dashboard
     # session with one click, else offers every configured door (GitHub / Google / email code).
     import secrets as _secrets
@@ -2383,6 +2397,8 @@ from .domain.asynctasks import extract_submission as _extract_submission  # noqa
 from .domain.asynctasks import fetch_command as _async_fetch_command  # noqa: E402
 from .domain.asynctasks import shown as _shown  # noqa: E402
 from .domain.asynctasks import classify_terminal as _classify_terminal  # noqa: E402
+from .domain.asynctasks import finished_on_submission as _finished_on_submission  # noqa: E402
+from .domain.asynctasks import max_age as _async_max_age  # noqa: E402
 from .domain.asynctasks import json_path as _json_path  # noqa: E402
 
 
@@ -2435,39 +2451,46 @@ def await_async_task(descriptor: dict, submission: httpx.Response, call_fn, cloc
         recovery = f"treg call {shlex.quote(target)}"
 
     interval = float(descriptor.get("interval") or 10)
+    # A provider that asks callers to stop polling sooner (`max_age`) bounds the wait.
+    timeout = min(timeout, _async_max_age(descriptor).total_seconds())
     start = clock.monotonic()
     failures = 0
     warned: set[str] = set()
+    # The submission may already be the finished answer (`terminal_on_submission`): no poll.
+    ready = (submission, submitted) if _finished_on_submission(descriptor, submitted) else None
     while True:
-        if clock.monotonic() - start >= timeout:
-            return {"code": 3, "task_id": str(task_id), "recovery": recovery,
-                    "error": "timed out while waiting for the async task"}
-        clock.sleep(interval if failures == 0 else min(60.0, interval * (2 ** (failures - 1))))
-        try:
-            response = call_fn(target, params)
-        except (httpx.RequestError, OSError) as exc:
-            failures += 1
-            _clock_report(clock, f"async poll retry {failures}/5 after a network error: {exc}")
-            if failures >= 5:
+        if ready is not None:
+            (response, terminal), ready = ready, None
+        else:
+            if clock.monotonic() - start >= timeout:
                 return {"code": 3, "task_id": str(task_id), "recovery": recovery,
-                        "error": f"polling failed five consecutive times: {exc}"}
-            continue
-        if response.status_code >= 500:
-            failures += 1
-            _clock_report(clock, f"async poll retry {failures}/5 after HTTP {response.status_code}")
-            if failures >= 5:
+                        "error": "timed out while waiting for the async task"}
+            clock.sleep(interval if failures == 0 else min(60.0, interval * (2 ** (failures - 1))))
+            try:
+                response = call_fn(target, params)
+            except (httpx.RequestError, OSError) as exc:
+                failures += 1
+                _clock_report(clock, f"async poll retry {failures}/5 after a network error: {exc}")
+                if failures >= 5:
+                    return {"code": 3, "task_id": str(task_id), "recovery": recovery,
+                            "error": f"polling failed five consecutive times: {exc}"}
+                continue
+            if response.status_code >= 500:
+                failures += 1
+                _clock_report(clock, f"async poll retry {failures}/5 after HTTP {response.status_code}")
+                if failures >= 5:
+                    return {"code": 3, "task_id": str(task_id), "recovery": recovery,
+                            "error": f"polling returned {response.status_code} five consecutive times"}
+                continue
+            if response.status_code >= 400:
                 return {"code": 3, "task_id": str(task_id), "recovery": recovery,
-                        "error": f"polling returned {response.status_code} five consecutive times"}
-            continue
-        if response.status_code >= 400:
-            return {"code": 3, "task_id": str(task_id), "recovery": recovery,
-                    "error": f"polling returned HTTP {response.status_code}"}
-        failures = 0
-        try:
-            terminal = response.json()
-        except ValueError:
-            return {"code": 3, "task_id": str(task_id), "recovery": recovery,
-                    "error": "a polling response was not JSON"}
+                        "error": f"polling returned HTTP {response.status_code}"}
+            failures = 0
+            try:
+                terminal = response.json()
+            except ValueError:
+                return {"code": 3, "task_id": str(task_id), "recovery": recovery,
+                        "error": "a polling response was not JSON"}
         status = str(_json_path(terminal, descriptor["status"]["path"]))
         outcome = _classify_terminal(descriptor, terminal)
         if outcome == "success":
@@ -2528,13 +2551,15 @@ def _call_envelope(response: httpx.Response, content_type: str) -> dict:
         meta["async"] = True
     if kind := headers.get("X-Treg-Hint"):
         meta["hint"] = kind
+    if routed := headers.get("X-Treg-Routed-Tool"):
+        meta["routed_tool"] = routed
     return {"result": result, "_treg": meta}
 
 
 def _show_call_response(response: httpx.Response) -> None:
     content_type = getattr(response, "headers", {}).get("content-type", "").partition(";")[0].strip().lower()
     if _JSON_OVERRIDE:
-        print(json.dumps(_call_envelope(response, content_type), ensure_ascii=False, separators=(",", ":")))
+        print(jsontext.dumps(_call_envelope(response, content_type), separators=(",", ":")))
         sys.stdout.flush()
         if response.status_code >= 400:
             raise SystemExit(1)
@@ -2679,7 +2704,9 @@ def cmd_call(args, cfg) -> None:
             _print_raw_response(response)
         if outcome.get("result") not in (None, ""):
             value = outcome["result"]
-            rendered = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+            # A lone surrogate in the provider's text would otherwise raise on a UTF-8 stderr.
+            rendered = (jsontext.dumps(value) if isinstance(value, (dict, list))
+                        else str(value).encode("utf-8", "backslashreplace").decode("utf-8"))
             print(f"result: {rendered}", file=sys.stderr)
         if outcome.get("fetch_command"):
             # What comes back is the provider's own retrieval answer: the file bytes (OpenRouter) or
@@ -4198,7 +4225,7 @@ def _topup_auto(args, cfg) -> None:
     turning_on = args.auto == "on"
     body: dict = {"enabled": turning_on, "consent": False}
     for key, val in (("threshold_usd", args.threshold), ("amount_usd", args.auto_amount),
-                     ("monthly_cap_usd", args.auto_cap)):
+                     ("monthly_cap_usd", args.auto_cap), ("per_hour", getattr(args, "auto_per_hour", None))):
         if val is not None:
             body[key] = val
     if turning_on:
@@ -4207,7 +4234,9 @@ def _topup_auto(args, cfg) -> None:
         t = f"${threshold}" if isinstance(threshold, (int, float)) else threshold
         a = f"${amount}" if isinstance(amount, (int, float)) else amount
         print(f"\n  {_AM}Auto top-up charges your saved card when nobody is at the keyboard.{_R}")
-        print(f"  {_M}Whenever your balance drops below {t}, we charge {a} to the card on file.{_R}\n")
+        n = getattr(args, "auto_per_hour", None) or "up to 5"
+        print(f"  {_M}Whenever your balance drops below {t}, we charge {a} to the card on file, "
+              f"{n} times per hour at most.{_R}\n")
         if not _confirm_consent():
             sys.exit("cancelled — auto top-up is unchanged.")
         body["consent"] = True
@@ -4229,7 +4258,8 @@ def _topup_auto(args, cfg) -> None:
         print(f"\n  {_M}Auto top-up switches on by itself once the card is saved.{_R}\n")
         return
     print(f"\n  {_G}Auto top-up is on.{_R} Add {_usd(auto.get('amount_micro') or 0)} whenever the "
-          f"balance drops below {_usd(auto.get('threshold_micro') or 0)}.")
+          f"balance drops below {_usd(auto.get('threshold_micro') or 0)}, at most "
+          f"{auto.get('per_hour') or 5} times per hour.")
     print(f"  {_M}Monthly ceiling {_usd(auto.get('monthly_cap_micro') or 0)} — we stop there, "
           f"whatever happens.{_R}\n")
 
@@ -4540,6 +4570,27 @@ def cmd_org_overflow(args, cfg) -> None:
     print(f"\n  overflow relay: {_A if on else _AM}{'on' if on else 'off'}{_R}"
           f"  {_M}(when treg's own account is out, serve the same endpoint via a treg-owned "
           f"aggregator account — disclosed, real price){_R}\n")
+
+
+def cmd_org_archive(args, cfg) -> None:
+    """Show or set whether this team takes part in treg's archive of answers. Off = no new call of
+    the team's is answered from or recorded into the archive, so metered calls lose the repeat
+    price; own keys stay free."""
+    with _client(cfg) as c:
+        org_id = _active_org_id(cfg, c)
+        if org_id is None:
+            sys.exit("no active org")
+        if args.state is None:
+            r = c.get(f"/orgs/{org_id}/settings")
+        else:
+            r = c.patch(f"/orgs/{org_id}/settings", json={"archive": args.state == "on"})
+    if _JSON_OVERRIDE or r.status_code >= 400:
+        _show(r)
+        return
+    on = r.json().get("archive", True)
+    print(f"\n  archive: {_A if on else _AM}{'on' if on else 'off'}{_R}"
+          f"  {_M}(off: new calls are neither answered from nor stored in the archive; metered "
+          f"calls lose the repeat price){_R}\n")
 
 
 def cmd_org_budget_set(args, cfg) -> None:
@@ -5139,17 +5190,53 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
+def _catalog_new_days(value: str) -> int:
+    """`--new [DAYS]`: a whole number of days. A word here is a search word typed after `--new`."""
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--new takes a number of days, not {value!r}; put search words before --new "
+            f"(treg catalog search phone --new 60)") from None
+
+
 def _catalog_search(query: str, args, cfg) -> None:
-    """Ranked free-text search over every endpoint — the way in when you know the job, not the shelf."""
-    if not query.strip():
-        sys.exit("search for what? e.g. treg catalog search tiktok comments")
+    """Ranked free-text search over every endpoint — the way in when you know the job, not the shelf.
+
+    `--new [DAYS]` keeps tools added in the last DAYS days (30 when no number is given) and `--sort
+    newest` lists newest first; with either, the words are optional."""
+    days, sort = getattr(args, "new", None), getattr(args, "sort", None) or "best"
+    added = days is not None or sort == "newest"
+    if not query.strip() and not added:
+        sys.exit("search for what? e.g. treg catalog search tiktok comments\n"
+                 "or list new tools: treg catalog search --new")
+    params: dict = {"q": query, "limit": getattr(args, "limit", 25) or 25}
+    if days is not None:
+        params["added_within_days"] = days
+    if sort != "best":
+        params["sort"] = sort
     with _client(cfg, auth=False) as c:
-        r = c.get("/catalog/search", params={"q": query, "limit": getattr(args, "limit", 25) or 25})
+        r = c.get("/catalog/search", params=params)
     if r.status_code != 200 or _JSON_OVERRIDE:
         _show(r)
         return
     body = r.json()
     rows = body.get("results", [])
+    if added and "added_within_days" not in body and "sort" not in body:
+        # An older server ignores both options and answers a plain search: say so rather than
+        # labelling ordinary results as new tools.
+        print("this server does not support --new yet")
+        return
+    if body.get("capped_at_days"):
+        _dim(f"--new is capped at {body['capped_at_days']} days")
+    if added:
+        within = body.get("added_within_days")
+        about = f"\"{query}\" tools" if query.strip() else "tools"
+        if not rows:
+            print(f"no {about} added in the last {within} days" if within else f"no {about} found")
+            return
+        what = (f"{about} added in the last {within} days" if within else about) \
+            + (", newest first" if body.get("sort") == "newest" else "")
     if not rows:
         print(f"nothing matches \"{query}\"")
         for n in (body.get("near") or [])[:3]:
@@ -5160,12 +5247,13 @@ def _catalog_search(query: str, args, cfg) -> None:
         return
 
     idw = min(max(len(e["id"]) for e in rows), 46)
-    print(f"\n{body['total']} matches for \"{query}\""
+    print(f"\n{body['total']} " + (what if added else f"matches for \"{query}\"")
           + (f" — showing {len(rows)} (--limit {min(body['total'], 100)} for more)" if body["total"] > len(rows) else ""))
     connected = _connected_providers(cfg)
     # No PLATFORM/PROVIDER columns: the id spells both (`hunter.people.email.find`), and the width
-    # is better spent on the summary an agent actually reads.
-    print(f"\n  {'ENDPOINT':<{idw}} {'COST':<16} ●  SUMMARY")
+    # is better spent on the summary an agent actually reads. ADDED is the UTC day the tool
+    # reached main (a routed row is a choice among tools and has none).
+    print(f"\n  {'ENDPOINT':<{idw}} {'COST':<16} {'ADDED':<10} ●  SUMMARY")
     # The server groups a capability that has a ROUTED row: the parent first, its children right
     # under it. Draw that as a hierarchy — "let treg choose" leads, the specific providers indent.
     routed_caps = {e["capability"] for e in rows if e.get("kind") == "routed"}
@@ -5183,7 +5271,7 @@ def _catalog_search(query: str, args, cfg) -> None:
         if e.get("kind") == "routed":
             _close_group()
             open_group = e
-            print(f"▸ {_clip(e['id'], idw):<{idw}} {_clip(_cost_usd(e.get('cost')), 16):<16} "
+            print(f"▸ {_clip(e['id'], idw):<{idw}} {_clip(_cost_usd(e.get('cost')), 16):<16} {'-':<10} "
                   f"{'●' if e['provider'] in connected else ' '}  ROUTED — {_clip(e.get('summary', ''), 70)}")
             _dim(f"    treg picks among {len(e.get('routed_children') or [])} providers (own keys first, then cheapest "
                  f"per hit) and names the one that served. To choose the provider yourself, call a child id:")
@@ -5193,6 +5281,7 @@ def _catalog_search(query: str, args, cfg) -> None:
             open_group = None
         indent = "    " if e.get("capability") in routed_caps else "  "
         print(f"{indent}{_clip(e['id'], idw):<{idw}} {_clip(_cost_usd(e.get('cost')), 16):<16} "
+              f"{e.get('added') or '-':<10} "
               f"{'●' if e['provider'] in connected else ' '}  {_clip(e.get('summary', ''), 78)}")
     _close_group()
     _dim(f"\ntreg catalog get {rows[0]['id']}   # params, cost, example response")
@@ -5516,7 +5605,7 @@ def cmd_hub_run(args, cfg) -> None:
     if r.status_code == 200 and not getattr(args, "json", False):
         out = r.json()
         _section(f"② Output of {out.get('recipe')}")
-        print(json.dumps(out.get("output"), indent=2, ensure_ascii=False)[:6000])
+        print(jsontext.dumps(out.get("output"), indent=2)[:6000])
         _hub_trace(out)
         return
     _hub_report(r, json_out=getattr(args, "json", False))
@@ -5701,6 +5790,7 @@ def _catalog_get_hub(e: dict) -> None:
     def _line(k: str, v: str) -> None:
         if v:
             print(f"  {_M}{k:<10}{_R}{v}")
+    _line("added", e.get("added") or "")
     _line("maker", f"{e.get('provider')}  (a hub tool made of {e.get('made_of')} tool{'s' if e.get('made_of') != 1 else ''}; {e.get('recipe')} recipe, v{e.get('version')})")
     _line("price", f"{e.get('price_line')}")
     _line("a run", f"{e.get('price_range') or ''}   (what a caller paid per successful run: provider fees and the seller price together)")
@@ -5785,6 +5875,7 @@ def _catalog_get(endpoint_id: str, cfg) -> None:
         _line("verified", "generated from its children's verified adapters — not a live route itself")
     else:
         _line("verified", e.get("verified") or "not verified against the live API")
+    _line("added", e.get("added") or "")
     _line("tier", e.get("tier", "core"))
     _line("limits", prov.get("limits", ""))
     _line("pricing", prov.get("pricing_url", ""))
@@ -5808,6 +5899,8 @@ def _catalog_get(endpoint_id: str, cfg) -> None:
         _dim("  a miss tries the next one (ceiling $1 per call by default); --header 'X-Treg-Route-Max-Cost: 0.05' to cap it,")
         _dim("  --header 'X-Treg-Route-Waterfall: 0' to stop at the first miss,")
         _dim("  --header 'X-Treg-Route-Strict-Filters: 1' to refuse (422, unbilled) rather than call a provider that ignores a filter you sent")
+        if "X-Treg-Route-Verify" in (routing.get("headers") or {}):
+            _dim("  --header 'X-Treg-Route-Verify: true' to check a hit in the same call, at the check's own price")
         also = routing.get("also") or []
         if also:
             print(f"\n{_A}ALSO{_R}  {_M}the same job from providers treg does not route to (yet) — call them by id{_R}")
@@ -6062,8 +6155,79 @@ def _byo_body(args) -> dict:
             "token_uri": block.get("token_uri", "https://oauth2.googleapis.com/token"), "scopes": args.scopes}
 
 
+def _pasted_key_provider(cfg, service: str) -> dict | None:
+    """The registry entry for `service` when it is connected by pasting a key (Moz, Hunter, Slack's
+    bot token), else None. Unknown, unreachable or an unreadable listing: None, so `/oauth/start`
+    gives the server's own answer."""
+    try:
+        with _client(cfg) as c:
+            r = c.get("/oauth/providers")
+        listing = r.json() if r.status_code == 200 else []
+    except (httpx.HTTPError, ValueError):
+        return None
+    if not isinstance(listing, list):
+        return None
+    entry = next((p for p in listing if isinstance(p, dict) and p.get("service") == service), None)
+    return entry if entry and entry.get("auth_kind") in ("key", "token") else None
+
+
+def _connect_pasted_key(args, cfg, provider: dict) -> None:
+    """A pasted-key provider has no consent screen: read the key without echoing it, or from stdin
+    with --key-stdin (agents/CI, so it never lands on the command line), and let the server verify
+    and store it. Unattended, stdin is read only on request: an idle pipe would otherwise hang.
+    A provider signing with a pair (Tomba's key + secret) reads both before anything is sent; piped,
+    the key is the first line and the second credential the next."""
+    label = provider.get("token_label") or "API key"
+    display = provider.get("display_name") or provider["service"]
+    extra_label = provider.get("extra_credential_label") if provider.get("needs_extra_credential") else None
+    if args.name or args.capability or args.client_secret or args.scopes:
+        sys.exit(f"{display} is connected with a pasted {label}; a name, --capability, "
+                 "--client-secret and --scopes don't apply")
+    if args.key_stdin:
+        if sys.stdin.isatty():
+            sys.exit(f"--key-stdin reads a piped {label}; at a terminal, drop it to get a hidden prompt")
+        piped = sys.stdin.read()
+        lines = [line.strip() for line in piped.splitlines() if line.strip()]
+        key, extra = (lines[0] if lines else "", lines[1] if len(lines) > 1 else "") if extra_label \
+            else (piped, "")
+    elif sys.stdin.isatty():
+        if provider.get("setup_url"):
+            print(f"Get your {label}: {provider['setup_url']}")
+        try:
+            key = getpass.getpass(f"Paste your {display} {label} (input hidden): ")
+            extra = getpass.getpass(f"Paste your {display} {extra_label} (input hidden): ") if extra_label else ""
+        except (EOFError, KeyboardInterrupt):
+            sys.exit("\ncancelled — nothing was connected")
+    else:
+        sys.exit(f"no terminal to prompt for the {label}: pipe it in with --key-stdin, e.g. "
+                 f"`pbpaste | treg connections connect --provider {provider['service']} --key-stdin`")
+    if not key.strip():
+        sys.exit(f"no {label} given — nothing was connected")
+    if extra_label and not extra.strip():
+        sys.exit(f"{display} also needs your {extra_label}"
+                 + (f": pipe it as the second line after the {label}" if args.key_stdin else "")
+                 + " — nothing was connected")
+    with _client(cfg) as c:
+        r = c.post("/connections/token", json={"provider": provider["service"], "token": key.strip()})
+        if r.status_code == 200 and extra_label:
+            secret_id = r.json().get("id")
+            r = c.post(f"/connections/{secret_id}/extra-credential", json={"value": extra.strip()})
+    if r.status_code != 200:
+        _show(r)
+        sys.exit(1)  # `_show` exits only on >= 400; any other non-200 still connected nothing
+    d = r.json()
+    print(f"✅ Connected {display}. Connection id: {d.get('id')} ({d.get('name')})")
+
+
 def cmd_oauth_connect(args, cfg) -> None:
     if args.provider:  # registry mode — treg's own approved app supplies the credentials
+        pasted = _pasted_key_provider(cfg, args.provider)
+        if pasted:
+            _connect_pasted_key(args, cfg, pasted)
+            return
+        if args.key_stdin:
+            sys.exit(f"--key-stdin is for providers connected with a pasted key; {args.provider} "
+                     "isn't one here (see `treg connections providers`)")
         body = {"provider": args.provider}
         if args.name:
             body["name"] = args.name
@@ -6325,6 +6489,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "relay when treg's own account is out (admin+).",
              "treg org overflow", "treg org overflow off")
     oov.add_argument("state", nargs="?", choices=["on", "off"], help="omit to show"); oov.set_defaults(fn=cmd_org_overflow)
+    oar = mk(og, "archive", "Show or set whether this team takes part in treg's archive of answers; off "
+                            "means new calls are neither answered from nor stored in it (admin+).",
+             "treg org archive", "treg org archive off")
+    oar.add_argument("state", nargs="?", choices=["on", "off"], help="omit to show"); oar.set_defaults(fn=cmd_org_archive)
     osr = mk(og, "set-role", "Change a member's role (owner only).", "treg org set-role 5 admin")
     osr.add_argument("user_id", type=int, help="the member's user id (from `org members`)")
     osr.add_argument("role", choices=["viewer", "member", "admin", "owner"], help="the new role"); osr.set_defaults(fn=cmd_org_set_role)
@@ -6892,6 +7060,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="with --auto on: how many dollars to add on each automatic refill")
     tu.add_argument("--cap", dest="auto_cap", type=float, default=None,
                     help="with --auto on: the most auto top-up may charge in a calendar month")
+    tu.add_argument("--per-hour", dest="auto_per_hour", type=int, default=None,
+                    help="with --auto on: how many automatic refills may run in one hour (1-60, default 5)")
     tu.set_defaults(fn=cmd_topup)
 
     # ---- health + oauth ----
@@ -6903,6 +7073,9 @@ def build_parser() -> argparse.ArgumentParser:
             "treg catalog                                   # platforms, busiest first",
             "treg catalog tiktok                            # every provider's tiktok endpoints, by capability",
             "treg catalog search tiktok comments            # find an endpoint by what it does",
+            "treg catalog search --new                      # tools added in the last 30 days, newest first",
+            "treg catalog search phone --new 60             # phone tools added in the last 60 days",
+            "treg catalog search linkedin --sort newest     # linkedin tools, newest first",
             "treg catalog get tikhub.tiktok.video.comments  # params, cost, example response, how to call it",
             "treg catalog request \"Ahrefs backlinks\"        # missing? file it — requests steer what gets added")
     ct.add_argument("platform", nargs="?", metavar="<platform|search|get|request>",
@@ -6910,6 +7083,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "`request <what's missing>`")
     ct.add_argument("rest", nargs="*", metavar="<args>", help="the search query, endpoint id, or request text")
     ct.add_argument("--limit", type=int, default=25, help="search: how many results (default: 25, max 100)")
+    ct.add_argument("--new", nargs="?", type=_catalog_new_days, const=30, default=None, metavar="DAYS",
+                    help="search: only tools added in the last DAYS days (default 30, max 365); "
+                         "words are optional")
+    ct.add_argument("--sort", choices=["best", "newest"], default="best",
+                    help="search: best match (default) or newest first")
     ct.add_argument("--all", action="store_true", dest="show_all",
                     help="include management endpoints (account/utility CRUD) hidden from the browse by default")
     ct.set_defaults(fn=cmd_catalog)
@@ -6932,6 +7110,8 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--capability", help="scope set to request (default: provider-specific)")
         parser.add_argument("--client-secret", help="path to your own OAuth client-secret JSON (bring-your-own-app)")
         parser.add_argument("--scopes", nargs="+", default=[], help="one or more OAuth scopes (with --client-secret)")
+        parser.add_argument("--key-stdin", action="store_true",
+                            help="a pasted-key provider: read the key from stdin (agents/CI) instead of a hidden prompt")
         parser.set_defaults(fn=cmd_oauth_connect)
 
     cnp = mk(sub, "connections", "Your connected accounts: connect providers, health, expiry.",
@@ -6945,6 +7125,8 @@ def build_parser() -> argparse.ArgumentParser:
     _connect_args(mk(cn, "connect", "Connect a provider: browser OAuth consent — or a pasted API key for key-based providers.",
                      "treg connections connect --provider google-search-console          # treg's app, read scope",
                      "treg connections connect --provider google-search-console --capability write",
+                     "treg connections connect --provider hunter                         # a key: prompts, input hidden",
+                     "echo \"$HUNTER_KEY\" | treg connections connect --provider hunter --key-stdin   # agents/CI",
                      "treg connections connect gsc --client-secret ./client_secret.json --scopes <scope>  # your own app"),
                  "treg connections")
     mk(cn, "providers", "List providers treg holds its own OAuth app for (what you can connect).",
@@ -6963,7 +7145,7 @@ def build_parser() -> argparse.ArgumentParser:
                ).add_subparsers(dest="sub", required=True, metavar="<subcommand>")
     mk(oa, "providers", "List providers treg holds its own OAuth app for.",
        "treg oauth providers").set_defaults(fn=cmd_oauth_providers)
-    _connect_args(mk(oa, "connect", "Mint an auto-refreshed OAuth secret through browser consent.",
+    _connect_args(mk(oa, "connect", "(alias) Connect a provider: browser consent, or a pasted key for key-based providers.",
                      "treg oauth connect --provider google-search-console"), "treg oauth")
 
     # ---- super-admin ----

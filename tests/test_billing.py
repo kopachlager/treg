@@ -1137,3 +1137,105 @@ def test_funnel_attribution_never_accepts_arbitrary_urls_or_payloads():
     for value in [None, {}, [], "https://example.test/?email=secret", "person@example.test", "arena\nsecret"]:
         assert funnel_surface(value) == "unknown"
     assert funnel_surface("arena") == "arena"
+
+
+# ---- re-arming after repeated declines -----------------------------------------------------------
+def _declined(**over) -> dict:
+    """An org whose auto-top-up turned itself off after repeated declines on `pm_old`."""
+    return {"autotopup_consented_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            "autotopup_enabled": False, "autotopup_disabled_reason": "max_attempts:card_declined",
+            "autotopup_failures": 3, "stripe_customer_id": "cus_1", "stripe_default_pm": "pm_old", **over}
+
+
+async def _paid_checkout(c: AsyncClient, monkeypatch, org_id: int, card: str, n: int = 1):
+    async def pm(pi_id):
+        return card, "fp_" + card
+    monkeypatch.setattr(billing, "_pm_and_fingerprint", pm)
+    return await _deliver(c, {"id": f"evt_cs_rearm_{n}", "type": "checkout.session.completed", "data": {
+        "object": {"id": f"cs_rearm_{n}", "object": "checkout.session", "mode": "payment",
+                   "payment_status": "paid", "amount_total": 2_000, "currency": "usd",
+                   "payment_intent": f"pi_rearm_{n}",
+                   "metadata": {"treg_org_id": str(org_id), "treg_kind": "topup"}}}})
+
+
+async def _setup(c: AsyncClient, org_id: int, card: str, n: int = 1):
+    return await _deliver(c, {"id": f"evt_si_rearm_{n}", "type": "setup_intent.succeeded", "data": {
+        "object": {"id": f"seti_rearm_{n}", "object": "setup_intent", "payment_method": card,
+                   "metadata": {"treg_org_id": str(org_id), "treg_kind": "autotopup_card"}}}})
+
+
+@pytest.mark.parametrize("card", ["pm_old", "pm_new"])
+async def test_a_manual_payment_re_arms_autotopup_after_declines(c: AsyncClient, monkeypatch, card):
+    """The live case: three declines turned it off, then the team paid $20 by hand seven times in a
+    day and stayed off. A card that just paid is proof it works, the declined one included."""
+    org_id, owner = await _org(c)
+    monkeypatch.setattr(billing, "_sdk", _no_sdk)
+    await _set_org(org_id, **_declined())
+    assert (await _paid_checkout(c, monkeypatch, org_id, card)).json()["credited"] is True
+    state = (await c.get("/billing", headers=_h(owner))).json()["autotopup"]
+    assert state["enabled"] is True and state["disabled_reason"] is None
+    async with session_maker() as db:
+        org = await db.get(Org, org_id)
+    assert org.autotopup_failures == 0 and org.stripe_default_pm == card
+
+
+async def test_a_new_saved_card_re_arms_but_the_declined_card_saved_again_does_not(c: AsyncClient, monkeypatch):
+    org_id, owner = await _org(c)
+    monkeypatch.setattr(billing, "_sdk", _no_sdk)
+    await _set_org(org_id, **_declined())
+    await _setup(c, org_id, "pm_old", 1)                      # the same declined card: no proof
+    assert (await c.get("/billing", headers=_h(owner))).json()["autotopup"]["enabled"] is False
+    await _setup(c, org_id, "pm_new", 2)                      # a different card: the cause is gone
+    state = (await c.get("/billing", headers=_h(owner))).json()["autotopup"]
+    assert state["enabled"] is True and state["disabled_reason"] is None
+
+
+@pytest.mark.parametrize("reason", ["authentication_required", None])
+async def test_3ds_and_a_deliberate_off_stay_off_after_a_manual_payment(c: AsyncClient, monkeypatch, reason):
+    """3DS: an off-session charge would need the bank's check again. None: the team switched it off."""
+    org_id, owner = await _org(c)
+    monkeypatch.setattr(billing, "_sdk", _no_sdk)
+    await _set_org(org_id, **_declined(autotopup_disabled_reason=reason))
+    await _paid_checkout(c, monkeypatch, org_id, "pm_new")
+    state = (await c.get("/billing", headers=_h(owner))).json()["autotopup"]
+    assert state["enabled"] is False and state["disabled_reason"] == reason
+
+
+# ---- charges per hour -----------------------------------------------------------------------------
+@pytest.mark.parametrize("minutes_ago, failures, per_hour, fires", [
+    (13, 0, 0, True),      # default 5 an hour: 12 minutes after a success is enough
+    (11, 0, 0, False),
+    (13, 1, 0, False),     # after a FAILED charge the wait is still one hour
+    (61, 1, 0, True),
+    (2, 0, 60, True),      # the team's own setting: 60 an hour = one a minute
+])
+async def test_charges_per_hour_sets_the_wait_after_a_success(c: AsyncClient, monkeypatch,
+                                                              minutes_ago, failures, per_hour, fires):
+    org_id, _ = await _org(c)
+    await _armed(org_id, autotopup_failures=failures, autotopup_max_per_hour=per_hour,
+                 autotopup_last_attempt_at=billing._now() - timedelta(minutes=minutes_ago))
+    monkeypatch.setattr(billing, "configured", lambda: True)
+
+    async def fake_run(oid):
+        billing._scheduled.discard(oid)
+    monkeypatch.setattr(billing, "_run_autotopup", fake_run)
+    async with session_maker() as db:
+        org = await db.get(Org, org_id)
+        assert billing.maybe_schedule_autotopup(org) is fires
+    if not fires:                                        # the DB check under the lock agrees
+        assert (await _attempt(org_id))["reason"] == "cooldown"
+
+
+async def test_a_team_sets_its_charges_per_hour(c: AsyncClient, monkeypatch):
+    org_id, owner = await _org(c)
+    monkeypatch.setattr(billing, "_sdk", _no_sdk)
+    await _set_org(org_id, autotopup_consented_at=billing._now())
+    r = await c.post("/billing/autotopup", headers=_h(owner),
+                     json={"enabled": True, "consent": True, "per_hour": 10, "setup_url": False})
+    assert r.status_code == 200, r.text
+    state = r.json()["autotopup"]
+    assert state["per_hour"] == 10 and state["wait_s"] == 360
+    for bad in (0, 61):
+        r = await c.post("/billing/autotopup", headers=_h(owner), json={"enabled": True, "per_hour": bad})
+        assert r.status_code in (400, 422), r.text
+    assert (await c.get("/billing", headers=_h(owner))).json()["autotopup"]["per_hour"] == 10

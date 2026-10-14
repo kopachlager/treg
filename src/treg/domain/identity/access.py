@@ -336,9 +336,9 @@ async def require_superadmin(
     """Cross-tenant gate for /admin/*. Authorized by the env admin token, a token whose user is
     is_superadmin, OR a session whose user is is_superadmin. Returns a principal (for audit).
 
-    On the admin pool, and it must name the same dependency callable its handlers do — FastAPI
-    caches dependencies per request by identity, so a gate on `get_session` would put admin traffic
-    back on the API pool through the back door."""
+    On the admin primary pool, shared with primary handlers. Successful authorization releases
+    its transaction before an opted-in report opens a read session. A gate on `get_session`
+    would put admin traffic back on the API pool through the back door."""
     admin = get_settings().admin_token
     if x_treg_token and admin and hmac.compare_digest(x_treg_token, admin):
         await db.commit()
@@ -375,8 +375,12 @@ def _require_can_register(caller: Caller) -> None:
 def _norm_email(email: str) -> str:
     """Canonical email identity: trimmed + lowercased. One human = one identity regardless of the
     case they type. Applied at every identity door + every invite comparison so `Bob@X.com` and
-    `bob@x.com` never fork into two users / two orgs and an invite is always redeemable."""
-    return email.strip().lower()
+    `bob@x.com` never fork into two users / two orgs and an invite is always redeemable. A domain's
+    trailing dots are the fully-qualified spelling of the same domain, so `bob@x.com.` is `bob@x.com`
+    too; left in, they slip a listed domain past the blocklist's label walk."""
+    email = email.strip().lower()
+    local, at, domain = email.rpartition("@")
+    return f"{local}@{domain.rstrip('.')}" if at and domain.rstrip(".") else email
 
 
 # ---- machine identities: the publishable demo token, and agents ----------------------------

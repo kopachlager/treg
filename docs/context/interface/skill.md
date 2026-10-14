@@ -5,6 +5,8 @@ sources:
   - src/treg/web/skill.md
   - src/treg/web/skills/make-ugc/SKILL.md
   - src/treg/web/skills/lead-signals/SKILL.md
+  - src/treg/web/skills/jev-memory/SKILL.md
+  - examples/claude-code-mods/jev-memory/hooks/jev-memory.mjs
   - src/treg/routers/web.py
   - src/treg/mcp_install.py
   - scripts/build_plugin.py
@@ -81,13 +83,15 @@ served**, because a second copy of the product's most-read page is a copy that r
 | the domain itself | `GET /.well-known/skills/index.json` + `/.well-known/skills/treg/SKILL.md` | anything speaking the agentskills.io convention (Hermes reads this directly) |
 | a workflow skill | `GET /skills/ugc/SKILL.md` (also `/.well-known/skills/make-ugc/SKILL.md`, second entry in the index): `make-ugc`, the `/ugc` workflow as a file to follow. Source `src/treg/web/skills/make-ugc/SKILL.md`; `.agents/skills/make-ugc` is a symlink to it so the repo's own agents and the served copy never drift. It delegates to `portrait-clone` and `ugc-talking-head-video` by URL rather than repeating them | anyone the /ugc page or the onboarding "Make UGC videos" card sends here |
 | a workflow skill | `GET /skills/lead-signals/SKILL.md` (also `/.well-known/skills/lead-signals/SKILL.md`, third entry in the index): `lead-signals`, the `/leads-signals` workflow as a file to follow: detect, qualify, contact, keep watching. It names signal families and the words to search the catalog with, never endpoint ids, because the catalog changes weekly; the schedule and the diff against the last list are the agent's, not treg's. Source `src/treg/web/skills/lead-signals/SKILL.md`; `.agents/skills/lead-signals` is a symlink to it. | anyone pointed at the URL |
+| a workflow skill | `GET /skills/jev-memory/SKILL.md`, **opt-in**: not in the index and no `/.well-known/` copy, so `install.sh` (`treg skill bootstrap`) never installs it; `npx skills add superdesigndev/treg --skill jev-memory` or the URL does. `jev-memory`, a memory for Claude Code. It installs the Claude Code mod in `examples/claude-code-mods/jev-memory` (a sparse clone registered as the one-plugin local marketplace `treg-mods`, because the root marketplace stays the single `treg` plugin) or hands the user one prompt to build the same mod. The mod judges each prompt after the turn with one `openrouter.ai-judge.decide` call through the treg CLI and saves sentences at 0.8 or higher to `.claude/jev-memory.md`. Source `src/treg/web/skills/jev-memory/SKILL.md`; the mod carries its own `claude plugin test` suite. | anyone the Claude Code mods video points here |
 
 `scripts/build_plugin.py` renders every plugin copy from the one source and `--check` fails if any is
 stale (`tests/test_plugin.py`). It also writes real copies of the workflow skills (`src/treg/web/skills/*`) to
 `skills/<name>/SKILL.md`, because `npx skills add superdesigndev/treg` (skills.sh) reads `skills/` and
 skips symlinks; repo-tooling skills under `.agents/skills` and `.claude/skills` carry
-`metadata.internal: true` so that command offers only what a user should install. The variants differ **only** in their prepended bootstrap, because they arrive in opposite worlds: the Codex plugin ships an MCP connector, so its
-bootstrap says *use the tools, not the terminal*; the Claude plugin declares **no connector in its
+`metadata.internal: true` so that command offers only what a user should install. The Codex plugin is the exception: it ships an MCP connector, and OpenAI's plugin review refuses a skill
+that downloads or runs code outside the package, so it carries a short connector-only skill (`CODEX_SKILL`)
+instead of the served page, with no CLI and no `install.sh`. The other variants differ **only** in their prepended bootstrap; the Claude plugin declares **no connector in its
 manifest** — so it installs with no token and nothing waits on a directory review — and its bootstrap
 does the opposite, walking the agent through `install.sh` → `treg login` → `treg mcp install` so the
 first run ends with the CLI *and* the tools. Skills-only is a property of the manifest, not of the

@@ -64,6 +64,13 @@ if _test_db_url and _worker and _test_db_url.startswith("postgresql"):
 os.environ["TREG_DATABASE_URL"] = _test_db_url or _default
 # Replica tests opt in explicitly; never inherit a real replica from the shell or .env.
 os.environ["TREG_READ_DATABASE_URL"] = ""
+# Never let a developer's Redis URL or rollout settings turn tests into shared-store traffic.
+os.environ["TREG_KV_URL"] = ""
+os.environ["TREG_MONEY_ADMISSION_ENABLED"] = "false"
+os.environ["TREG_MONEY_ADMISSION_ORG_IDS"] = "[]"
+os.environ["TREG_ORG_CONCURRENCY_ENABLED"] = "false"
+os.environ["TREG_ORG_CONCURRENCY_LIMITS"] = "{}"
+os.environ["TREG_ORG_CONCURRENCY_EXEMPT_ORG_IDS"] = "[]"
 os.environ["TREG_EMAIL_DEV_MODE"] = "true"  # tests need the returned OTP code (prod default is now False)
 os.environ["TREG_RESEND_API_KEY"] = ""  # never fire a real Resend send from the test suite (send_otp/send_invite skip when empty)
 os.environ["TREG_RUN_ALLOWED_BINS"] = "sh,echo,true,false,cat,sleep,treg-nonexistent-bin-xyz"  # allow the test CLIs for --server run tests
@@ -252,6 +259,22 @@ def make_upstream(hook_hits: list | None = None) -> FastAPI:
             return {"data": []}
         return {"data": [{"id": "IG-CONVERSATION-1", "page_id": page_id}]}
 
+    @up.get("/v25.0/{page_id}/posts")
+    async def facebook_page_posts(page_id: str, request: Request):
+        # Meta's new Pages experience answers a user token on a Page edge with code 190 /
+        # subcode 2069032. Only the token of the Page in the path is accepted.
+        expected_token = {
+            "PAGE-DIRECT": "PAGE-TOKEN-DIRECT",
+            "PAGE-CLIENT": "PAGE-TOKEN-CLIENT",
+        }.get(page_id)
+        if request.headers.get("authorization") != f"Bearer {expected_token}":
+            return JSONResponse(
+                {"error": {"message": "A Page access token is required for this call",
+                           "code": 190, "error_subcode": 2069032}},
+                status_code=400,
+            )
+        return {"data": [{"id": f"{page_id}_POST-1", "message": "hello"}]}
+
     @up.post("/v25.0/{page_id}/subscribed_apps")
     async def instagram_subscribe(page_id: str, request: Request):
         expected_token = {
@@ -371,7 +394,7 @@ async def verified_identity(client, email):
         with patch.object(email_sender, "send_otp", receive):
             started = await client.post("/auth/email/start", json={"email": email})
         assert started.status_code == 200, started.text
-        code = started.json().get("dev_code") or delivered[email]
+        code = started.json().get("dev_code") or delivered[started.json()["email"]]
         proof = await client.post("/auth/email/verify", json={"email": email, "code": code})
         assert proof.status_code == 200, proof.text
         return proof.json()["token"]
@@ -492,6 +515,8 @@ def _reset_call_path_caches():
         try:
             from treg.infra.upstream.limiter import limiter
             limiter.reset()
+            from treg.application.call import keyslots
+            keyslots._rotation.clear()
         except ImportError:
             pass
         # The shared store's in-process fallback (the review-invitation budget): org ids restart

@@ -29,24 +29,25 @@ export default function data(){
       editAccess:null, accessDraft:{}, inviteCustomize:false, inviteLocalRun:true, inviteToolSel:{}, accessNote:'',
       // agents (machine identities), projects (sub-scope) and deny rules (policy)
       orgTab:'members', showInvite:false, showAddAgent:false,
-      apiKeys:[], keyName:'', keyNameInvalid:false, keyBusy:false, keyErr:'', keyMsg:null, newApiKey:null, editKey:null, editKeyName:'', keyMenu:null, keyConfirm:null, activityKey:'',
+      apiKeys:[], apiKeySpend:null, keyName:'', keyNameInvalid:false, keyBusy:false, keyErr:'', keyMsg:null, editKey:null, editKeyName:'', keyMenu:null, keyConfirm:null, activityKey:'',
       agentSnip:'prompt',   // which paste-ready snippet the agent card shows (prompt = hand-to-agent, first)
       snipAgent:null,    // an EXISTING agent whose setup snippets are open (no token — placeholder)
       agents:[], agentName:'', agentRole:'member', agentCap:-1, agentBusy:false, agentErr:'', agentProjSel:{}, agentAccessMode:null, agentToolSel:{},
-      observedAgents:[], promoteHint:'', promotePending:null, agentTokens:{},  // minted tokens, THIS page-load only — the server stores hashes
-      newAgent:null, confirmAgent:null,
+      observedAgents:[], promoteHint:'', promotePending:null,
+      credentialIssues:{}, confirmAgent:null, // unacknowledged key results, memory only and scoped by org
       projects:[], projectName:'', projBusy:false, confirmProj:null, projDraft:{},
       editProj:null, projToolDraft:{}, projToolBusy:false,
       denyRules:[], denyForm:{host:'',path_prefix:'',method:'',user_id:null,project_id:null,note:''}, denyBusy:false, confirmDeny:null, cliDeny:[],
       bootVersion:'', newVersion:false,
-      usage:null, usageDays:30, myUsage:null, actTab:'feed', buildTab:'vendor',  // Activity page: 'feed' | 'usage'
+      usage:null, usageDays:30, usageSpend:null, usageSpendBusy:false, usageSpendErr:'', spendRange:{preset:30, from:'', to:''}, spendFilter:{group:'day', key:'', provider:'', stack:'key'}, spendRankPage:0, spendRankOpen:false, myUsage:null, actTab:'feed', buildTab:'vendor',  // Activity page: 'feed' | 'usage'
       tagUsage:{}, tagKeys:[],   // spend per X-Treg-Meta key: {customer:{…}, workspace:{…}}
   // usage-metering: rollups + the member's own used/cap
       // Billing (Stripe top-ups). `billing` null = not loaded / not an admin; billing.configured
       // false = this deployment sells no balance, so the whole block stays hidden.
-      billing:null, billingBusy:false, topupAmount:10, autoAmount:10, autoThreshold:5, autoConsent:false, autoOpen:false,
+      billing:null, billingBusy:false, topupAmount:10, autoAmount:10, autoThreshold:5, autoPerHour:5, autoConsent:false, autoOpen:false,
       topupOpen:false, topupPick:10, topupOther:null, topupAuto:true, topupErr:'',
       capCfg:null, capUsd:0, capBusy:false, capErr:'',
+      archiveBusy:false, archiveErr:'',
       renameName:'', renameSlug:'', renameBusy:false, renameErr:'',
       budgets:[], budDims:[], budDim:'', budVal:'', budDaily:'', budBusy:false, budErr:'',
       bhist:{items:[],loading:false,ok:true},   // past top-ups + their invoice/receipt links; ok=false means Stripe was unreachable, amounts are still right
@@ -87,7 +88,6 @@ export default function data(){
       verdictKinds:['useful','partly','not_useful'],   // an endpoint's agent verdicts, in bar order
       platCap:null,        // the compared capability a platform URL names, by its key (`compare`)
       drawerTool:null,       // endpoint id open in the tool drawer
-      catalogArm:'',         // the catalog-v2 arm this load was dealt (state/catalogExperiment.js)
       epInfo:{},         // endpoint id → {loading, data} from /catalog/endpoints/<id>
       platComparisonLead:null,    // the endpoint whose detail carries the open comparison's siblings and plan
       platComparisonSort:{key:'price', dir:'asc'},   // the comparison's order (DataTable v-model:sort)
@@ -117,6 +117,7 @@ export default function data(){
       share:{on:false, email:'', role:'viewer', full:true, busy:false, err:'', sent:null, member:null},  // detail-page "Share…" (invite + land on this page)
       me:'', icHash:'', myOrgs:[], isAdmin:false,
       onboarded:true,  // first-run onboarding done (server flag; gates the welcome modal)
+      onboardingV2:false, onboardingV2Exp:false, onboardingV2On:false, onboardingPreviewOn:false,  // the server's first-run flow (/onboarding) replaces the welcome modal
       welcome:{on:false, step:0, name:'', agent:'claude-code', moreOpen:false, busy:false, err:''},  // first-run: name your team → pick your agent → setup line
       emptyTab:'agent',
       tools:[], health:{}, calls:[], runs:[], callsLoaded:false, activityNext:null, activityOlderBusy:false, adminStats:null, adminOrgs:[], adminUsers:[],

@@ -17,16 +17,17 @@ import re
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
+from typing import cast
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer
+from sqlalchemy.orm import QueryableAttribute, defer
 from sqlmodel import select
 
-from . import archive, audit, crypto, localrun, ratestore, runner, sandbox as demo_sandbox
+from . import archive, audit, crypto, localrun, oauth_providers, ratestore, runner, sandbox as demo_sandbox
 from .application import asynctasks as async_task_app
 from .caller_metadata import _client_of
 from .config import get_settings
@@ -53,6 +54,7 @@ from .routers import admin as admin_routes
 from .routers import api_keys as api_key_routes
 
 from .routers import arena as arena_routes
+from .routers import web_arena as web_arena_routes
 from .routers import auth as auth_routes
 from .routers import billing as billing_routes
 from .routers import call as call_routes
@@ -215,6 +217,8 @@ async def meta() -> dict:
             # Whether the hub routes exist here at all (TREG_HUB_ENABLED), so the dashboard asks
             # them nothing when they would only answer 404. Per-team access is still probed.
             "hub": bool(s.hub_enabled),
+            # Providers this deployment paused (TREG_PAUSED_PROVIDERS), with the message to show.
+            "paused_providers": oauth_providers.paused_listing(),
             # Config only, no database: lets the top-bar referral entry name the reward on every page
             # without calling GET /referrals, which mints a code and runs the payout sweep.
             "referral": {"referrer_micro": int(s.referral_referrer_micro),
@@ -766,9 +770,13 @@ async def get_call(
     A 404 here therefore means "no audit row", not "this call never happened" — check `ledger` in the
     body before concluding anything about money.
     """
-    row = (await db.execute(select(CallRecord).where(
-        CallRecord.org_id == caller.org_id, CallRecord.call_ref == call_ref,
-        *pinned_tag_predicates(CallRecord.tags, caller.membership.pinned_tags)))).scalars().first()
+    # This view does not use failure evidence; forbid an accidental lazy load of those wide fields.
+    row = (await db.execute(
+        select(CallRecord)
+        .options(defer(cast(QueryableAttribute, CallRecord.error_request), raiseload=True),
+                 defer(cast(QueryableAttribute, CallRecord.error_response), raiseload=True))
+        .where(CallRecord.org_id == caller.org_id, CallRecord.call_ref == call_ref,
+               *pinned_tag_predicates(CallRecord.tags, caller.membership.pinned_tags)))).scalars().first()
     if row is None and caller.membership.pinned_tags:
         owned = (await db.execute(select(LedgerEntry.id).where(
             LedgerEntry.org_id == caller.org_id, LedgerEntry.call_id == call_ref,
@@ -869,6 +877,7 @@ router.routes.extend(call_routes.router.routes)
 router.routes.extend(table_routes.router.routes)
 router.routes.extend(activity_routes.app.routes)
 router.routes.extend(arena_routes.router.routes)
+router.routes.extend(web_arena_routes.router.routes)
 
 
 # ---- server-side CLI execution (Tier 0 `treg run`) ---------------------------------------

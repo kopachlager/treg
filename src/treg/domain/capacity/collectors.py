@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 
-from ...config import get_settings, platform_setting_name
+from ...config import TREG_USER_AGENT, get_settings, platform_setting_name
 
 # provider → coroutine(client, key) → {"value": float|None, "unit": str, "note": str}.
 # `unit` says what the number IS ("USD", "credits", "units left", "rows used") — the one lesson of
@@ -401,23 +401,6 @@ async def _dropleads(c, key):
     }
 
 
-async def _quickenrich(c, key):
-    # Free discovery carries the remaining subscription allowance; no account endpoint exists.
-    r = await c.post("https://app.quickenrich.io/api/employees/contact-finder",
-                     headers={"Authorization": f"Bearer {key}"},
-                     json={"company_url": {"include": ["treg-probe-nonexistent.invalid"], "exclude": []},
-                           "per_page": 1})
-    r.raise_for_status()
-    doc = r.json()
-    meta = doc.get("meta") if isinstance(doc, dict) else None
-    remaining = meta.get("remaining_credits") if isinstance(meta, dict) else None
-    # Missing or unclear allowance data is unknown, never evidence of an unlimited plan.
-    if not isinstance(doc, dict) or doc.get("success") is not True or type(remaining) is not int or remaining < 0:
-        return {"value": None, "unit": "credits", "note": "No finite subscription allowance reported; check QuickEnrich plan"}
-    return {"value": remaining, "unit": "credits",
-            "note": "Subscription allowance; resets at renewal, no auto-top-up. Reset date not reported."}
-
-
 async def _prospeo(c, key):
     d = await _get(c, "https://api.prospeo.io/account-information",
                    headers={"X-KEY": key})
@@ -663,21 +646,27 @@ async def _thecompaniesapi(c, key):
     return {"value": team.get("credits"), "unit": "credits", "note": ""}
 
 
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 async def _apollo(c, key):
-    # api_profile with include_credit_usage returns the caller's remaining balances directly.
-    # `num_credits_remaining` is the LEGACY field and went stale at 0 on 2026-08-24 while the
-    # account was still fine: a live 1-credit /people/match returned a verified email (200) with
-    # the field still reading 0, and only `total_unified_credits_used` moved. Apollo has moved
-    # this account to unified credits, so derive what is left from the granted lead pool minus
-    # unified usage, and keep the legacy field as a fallback for accounts still on the old model.
+    # api_profile with include_credit_usage meters each pool. The one that runs out is the LEAD
+    # pool (Apollo's 422 names `credit_type: lead credits`, `credit_balance: 0`), which every enrich
+    # match and search page draws on, and `num_credits_remaining` counts it down.
+    # `total_unified_credits_used` moves with `num_direct_dial_credits_used` (phone reveals) only:
+    # the granted pool minus it stays high while Apollo refuses every enrich. The legacy field has
+    # read a stale 0 on a healthy account before; that costs a minute of refusals per sweep (a
+    # probe's 2xx lifts the reading), where a stale high reading relays every call into the 422.
+    # Without the lead field there is no reading (stale): the unified meter is no stand-in for it.
     d = await _get(c, "https://api.apollo.io/api/v1/users/api_profile",
                    params={"include_credit_usage": "true"}, headers={"X-Api-Key": key})
-    granted, used = d.get("effective_num_lead_credits"), d.get("total_unified_credits_used")
-    left = (granted - used if isinstance(granted, (int, float)) and isinstance(used, (int, float))
-            else d.get("num_credits_remaining"))
+    lead = d.get("num_credits_remaining")
+    left = lead if _number(lead) else None
+    dial, dial_used = d.get("effective_num_direct_dial_credits"), d.get("num_direct_dial_credits_used")
+    dial_left = dial - dial_used if _number(dial) and _number(dial_used) else dial
     return {"value": left, "unit": "credits",
-            "note": f"lead pool {granted} granted / {used} unified credits used, "
-                    f"direct-dial {d.get('effective_num_direct_dial_credits')}, "
+            "note": f"lead pool {d.get('effective_num_lead_credits')} granted, direct-dial {dial_left} left, "
                     f"ai {d.get('effective_num_ai_credits')}"}
 
 
@@ -711,6 +700,24 @@ async def _tomba(c, key):
     return {"value": (dom.get("available", 0) - dom.get("used", 0)), "unit": "searches left",
             "note": f"verifications {ver.get('available', 0) - ver.get('used', 0)} left, "
                     f"plan {((d.get('pricing') or {}).get('name', '?'))}"}
+
+
+async def _hlrlookup(c, key):
+    # Free. Both halves of the pair ride in the JSON body; the secret has its own platform slot
+    # (HLRLOOKUP.platform_extra_setting). Credits can be fractional (cache hits cost half a credit).
+    secret = get_settings().platform_key_hlrlookup_secret or ""
+    r = await c.post("https://api.hlrlookup.com/apiv2/balance",
+                     json={"api_key": key, "api_secret": secret})
+    r.raise_for_status()
+    d = r.json()
+    raw = d.get("Credits") if isinstance(d, dict) and d.get("Status") == "OK" else None
+    try:
+        balance = Decimal(str(raw)) if not isinstance(raw, bool) and raw is not None else None
+    except (InvalidOperation, ValueError):
+        balance = None
+    if balance is None or not balance.is_finite() or balance < 0:
+        raise ValueError("HLR Lookup balance returned an invalid credit count")
+    return {"value": float(balance), "unit": "credits", "note": ""}
 
 
 async def _predictleads(c, key):
@@ -904,6 +911,13 @@ async def _cloro(c, key):
             "note": f"{d.get('perCycle')} per cycle; cycle resets {(d.get('cycleResetsAt') or '?')[:10]}"}
 
 
+async def _crawl4ai(c, key):
+    d = await _get(c, "https://api.crawl4ai.com/v1/billing/balance", headers={"Authorization": f"Bearer {key}"})
+    mc = d.get("credit_mc")
+    return {"value": _balance(mc / 1000 if type(mc) in (int, float) else None, "Crawl4AI"), "unit": "credits",
+            "note": f"plan {d.get('tier')}"}
+
+
 async def _reapi(c, key):
     # GET /api/v1/balance does not consume credits; 1 credit = $0.001 (reapi.ai/docs/api/balance).
     d = await _get(c, "https://reapi.ai/api/v1/balance", headers={"Authorization": f"Bearer {key}"})
@@ -923,6 +937,7 @@ async def _piapi(c, key):
 BALANCE_ROUTES = {
     "anyapi": _anyapi,
     "cloro": _cloro,
+    "crawl4ai": _crawl4ai,
     "piapi": _piapi,
     "reapi": _reapi,
     "enrichlayer": _enrichlayer,
@@ -945,6 +960,7 @@ BALANCE_ROUTES = {
     "oceanio": _oceanio,
     "predictleads": _predictleads,
     "tomba": _tomba,
+    "hlrlookup": _hlrlookup,
     "dataforseo": _dataforseo,
     "tikhub": _tikhub,
     "tinyfish": _tinyfish,
@@ -966,7 +982,6 @@ BALANCE_ROUTES = {
     "hunter": _hunter,
     "harvestapi": _harvestapi,
     "fetchinio": _fetchinio,
-    "quickenrich": _quickenrich,
     "prospeo": _prospeo,
     "aiark": _aiark,
     "wiza": _wiza,
@@ -993,8 +1008,14 @@ BALANCE_ROUTES = {
 # obtain. Kept explicit so the report names them instead of silently skipping, and so a future probe
 # has a list of what to re-check.
 NO_BALANCE_API = {
+    "quickenrich": "no balance endpoint, and no response carries the allowance any more: a free "
+                   "Contact Finder miss or hit and a billed employee search all return a meta without "
+                   "remaining_credits (or no meta), despite the published docs; the subscription "
+                   "allowance is visible in the QuickEnrich dashboard only",
     "octen": "no account balance or usage endpoint in the published OpenAPI; "
              "PAYG USD balance and usage are visible in the provider dashboard",
+    "parallel": "GET /account/service/v1/balance needs an Account API OAuth access token, "
+                "not an API key; the USD balance is visible in the Parallel Platform",
     "valyu": "no documented API endpoint for remaining credits or account usage; "
              "the subscription balance is visible in Valyu's dashboard",
     "perplexity": "no API credit-balance endpoint in the published API reference; "
@@ -1045,7 +1066,7 @@ NO_BALANCE_API = {
 
 # platform_key_* slots that are the SECOND half of a provider's credential pair, not a provider of
 # their own (see OAuthProvider.platform_extra_setting) — they must not become report rows.
-AUX_SLOTS = {"tomba_secret"}
+AUX_SLOTS = {"tomba_secret", "hlrlookup_secret"}
 
 
 def all_platform_providers() -> list[str]:
@@ -1077,7 +1098,7 @@ async def provider_balance(provider: str, client: httpx.AsyncClient | None = Non
                 "note": "no fetcher written yet"}
     try:
         if client is None:
-            async with httpx.AsyncClient(timeout=30) as c:
+            async with httpx.AsyncClient(timeout=30, headers={"User-Agent": TREG_USER_AGENT}) as c:
                 row = await fetch(c, key)
         else:
             row = await fetch(client, key)

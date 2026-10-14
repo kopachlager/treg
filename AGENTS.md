@@ -38,15 +38,24 @@ Everything else in this file is guidance; these are the contract, and they win o
    every path: timeout, cancellation and exceptions included.
 3. A request holds zero database connections while upstream or object-storage I/O is in flight.
    Keep `reserve` and `settle` separate; read archive pointers, close the session, then fetch bytes.
-4. Plain `/call/` is a faithful relay: the injected credential, the transport headers listed in
+4. Plain `/call/` is a faithful relay: the injected credential (on treg's shared key, one of treg's
+   accounts for the provider, chosen per call and fixed for anything an account created), the
+   transport headers listed in
    `src/treg/infra/upstream/relay.py`, and (on treg's shared key only) the per-org and, for pinned
-   agents, per-pin re-scoping of the caller's `Idempotency-Key` are the only rewrites. A credential
+   agents, per-pin re-scoping of the caller's `Idempotency-Key` and treg's own `User-Agent` in place
+   of the caller's are the only rewrites. A credential
    binding with `location: "json"` explicitly parses and reserializes the top-level JSON object; it
    is not byte-faithful and must never be used with an upstream that signs or hashes the raw body.
    Never add upstream-specific modeling.
+   One more rewrite, on 4xx/5xx only: every spelling of an injected credential the provider echoes
+   back in an error body is masked (`***`) before the caller, an idempotent replay or the evidence
+   row sees it. The error body is read whole (gzip/deflate decoded) up to 8 MiB; on a credentialed
+   call one that cannot be scanned is replaced whole, never relayed as a prefix.
    A live-verified free catalog endpoint may declare an anonymous fallback; its empty binding list
    omits credential injection but does not strip or rewrite caller headers.
-   Routed endpoints and overflow wrap the child's answer and say so; they never alter it. Responses needing settlement or ownership evidence are buffered by the application
+   Routed endpoints and overflow wrap the child's answer and say so; they never alter it. With
+   `X-Treg-Route-Verify`, an email or phone find makes one more linked child call (the check), with its own
+   hold and charge, and reports it in `_treg.verification`; the find's answer is not altered. Responses needing settlement or ownership evidence are buffered by the application
    up to 8 MiB; exceeding that limit fails without charging, never returns a successful prefix.
    An endpoint declaring `spooled_response` (inline media) instead reads its metered 2xx to an
    unlinked temp file under a per-body cap and per-process budget, settles from only the paths its
@@ -135,8 +144,11 @@ agents then built against a constitution that was wrong.
   approved it stays under review for good, unlisted or not, and its share
   page shows a run log of outcomes only unless the maker turns `public_log` off
   (`docs/hub-listing-decisions.md`). See `docs/context/architecture/hub.md`.
-- **Signup credit.** Once per new verified user, enforced by a user-level atomic claim committed
-  with the grant. Team deletion never restores eligibility; legacy registration is not email proof.
+- **Signup credit.** Once per new verified user and once per inbox (Gmail dots and `+tag` aliases
+  share one), enforced by a user-level atomic claim plus a `SignupPromoClaim` row committed with
+  the grant. Team deletion never restores eligibility; legacy registration is not email proof.
+  An installed policy extension may defer it through the `signup_credit` decision point
+  (`src/treg/policy.py`, docs/context/architecture/policy-extensions.md); extensions only restrict.
 - **Money.** Everything is **integer micro-USD** - never floats, never cents. The Stripe SDK lives
   only in `infra/stripe.py`, orchestration in `application/billing.py`, and `reconcile.py` is
   read-only. See `docs/context/architecture/money.md`.
@@ -145,7 +157,10 @@ agents then built against a constitution that was wrong.
   an `own_account` endpoint, and reach other teams only where the endpoint itself declares
   `cache.sharing: public`; a provider's storage licence never decides that. A hit on an own key
   is free; a metered hit settles through the same hold, at `archive_hit_repeat_price_percent`
-  once the team has paid for that question. See `docs/context/architecture/archive.md`.
+  once the team has paid for that question. A team that has opted out (`Org.archive_opt_out_at`)
+  is neither served from nor recorded into the archive on any tier; erasing what it stored is a
+  separate act (team deletion, `treg-worker admin erase-archive`), never a side effect of the
+  switch. See `docs/context/architecture/archive.md`.
 
 ### Security guards that look redundant on purpose
 
@@ -191,7 +206,11 @@ so parallel runs and side-by-side runs never share one.
   `fix: ...`, `docs: ...`); one logical change per commit; the PR says what changed and why and
   names the fragments it updated.
 - `/mcp/` and `/mcp/v2/` differ on purpose. A change to either or to shared MCP code is reviewed
-  against both; do not unify them in passing.
+  against both; do not unify them in passing. `/mcp/v2/`'s tools and hidden platforms match the
+  Claude directory submission: change them only with a resubmission. New features go to `/mcp/`.
+- **Every tool row carries `added:`**, the UTC day it reached main (`scripts/catalog_added.py`
+  writes today's where it is missing). Never change an existing one without the
+  `added-date-change` label; CI compares every tool id with the base branch.
 - **A catalog data PR is a few rows and a PR body.** Cache admission, comparison declarations,
   adapters and contracts are rows in `src/treg/catalog/`; each declaration carries a one-line
   reason and nothing more. The evidence (traffic, byte sizes, change observations, bodies read)

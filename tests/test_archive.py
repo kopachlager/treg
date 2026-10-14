@@ -1647,7 +1647,10 @@ async def test_change_observation_failure_preserves_record(clients, shadow, monk
             await asyncio.Event().wait()
         return None
     monkeypatch.setattr(archive, "_read_change_body", unavailable)
-    monkeypatch.setattr(archive, "_CHANGE_TIMEOUT_S", 0.05)
+    if failure == "timeout":
+        # The same timeout also bounds the write's own snapshot lookup: too short and a busy test
+        # run times that out instead, and the counts drift.
+        monkeypatch.setattr(archive, "_CHANGE_TIMEOUT_S", 0.5)
     before = archive.change_outcomes.copy()
     monkeypatch.setattr(call_service, "relay", _fake_relay(200, b'{"new":42}'))
     assert (await clients.get(f"/call/{EP}?aweme_id=7")).status_code == 200
@@ -1915,3 +1918,11 @@ def test_ambiguous_or_lossy_json_comparison_falls_back(body, non_json, paths):
     assert archive._normalized_hash(body, paths) is None
     if non_json:
         assert archive._change_summary(body, b'{}')['changed_paths'] == ['non_json']
+
+
+async def test_a_direct_call_names_the_routed_tool_for_its_job(clients: AsyncClient, serve):
+    """A successful call to one provider's endpoint names the routed tool for the same job, so an
+    agent can be pointed to the tool that picks the provider and falls back."""
+    live = await clients.get(f"/call/{EP}?aweme_id=7&count=5")
+    assert live.status_code == 200
+    assert live.headers["X-Treg-Routed-Tool"] == "treg.tiktok.video.comments"

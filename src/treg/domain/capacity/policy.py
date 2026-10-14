@@ -3,7 +3,7 @@ that turns the latest snapshot into a served/exhausted state."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +37,7 @@ _KNOWN: dict[str, tuple[str, str, str]] = {
     "thecompaniesapi": ("credits", "manual", "api"),
     "tomba": ("monthly_quota", "quota_reset", "api"),
     "hunter": ("monthly_quota", "quota_reset", "api"),
-    "quickenrich": ("monthly_quota", "quota_reset", "api"),
+    "quickenrich": ("monthly_quota", "quota_reset", "none"),
     "prospeo": ("monthly_quota", "quota_reset", "api"),
     "aiark": ("monthly_quota", "quota_reset", "api"),
     "wiza": ("credits", "manual", "api"),
@@ -45,10 +45,14 @@ _KNOWN: dict[str, tuple[str, str, str]] = {
     # Manually verified in the Developer Portal: vendor auto-recharge is enabled. treg neither
     # reads nor changes that setting, so the observation source remains manual.
     "trestleiq": ("cash", "auto_recharge", "manual"),
+    # Prepaid bundles bought by hand; the free balance route returns the exact credit count.
+    "hlrlookup": ("credits", "manual", "api"),
     "tavily": ("credits", "manual", "api"),
     "search1api": ("credits", "auto_recharge", "api"),
     "octen": ("cash", "manual", "manual"),
     "linkup": ("cash", "manual", "api"),
+    # The balance route needs an Account API OAuth token, not the API key treg holds.
+    "parallel": ("cash", "manual", "manual"),
     "you": ("cash", "auto_recharge", "api"),
     "valyu": ("credits", "subscription", "manual"),
     # The API supplies the exact credit balance; vendor auto recharge was manually enabled and
@@ -114,6 +118,10 @@ _RATE_LIMITS: dict[str, dict] = {
     # provider-wide limiter cannot weight one endpoint, so two calls/s is the safe shared-key pace.
     "fetchinio": {"limit": 2, "window_s": 1, "source": "policy"},
     "adyntel": {"limit": 5, "window_s": 1, "source": "docs"},
+    # HLR Lookup caps each customer at 210 concurrent requests and throttles per telephone
+    # network, answering 429 (unbilled) above about 200 requests/s. It publishes no per-second
+    # quota, so the shared key keeps a conservative pace; BYOK calls bypass this limiter.
+    "hlrlookup": {"limit": 50, "window_s": 1, "source": "policy"},
     # Search's documented burst allowance is the strictest request-count limit shared by these
     # hosts. Fetch additionally meters URLs and Agent limits concurrency; upstream remains the
     # authority for those differently-shaped limits.
@@ -128,11 +136,17 @@ _RATE_LIMITS: dict[str, dict] = {
     # endpoint-aware, protect the stricter search allowance and accept conservative enrichment.
     "prospeo": {"limit": 1, "window_s": 1, "source": "docs"},
     "aiark": {"limit": 5, "window_s": 1, "source": "docs"},
+    # The account allows 1,500 requests a minute (search and scrape share it). Pace the shared key at
+    # 1,000 so a burst waits briefly instead of collecting 429s; BYOK calls bypass this limiter.
+    "crawl4ai": {"limit": 1000, "window_s": 60, "source": "policy"},
     # Provisional: Wiza publishes 30/min for company enrichment, but not for search or autocomplete.
     # Reuse that ceiling provider-wide because smoothing is not endpoint-aware yet. This spaces
     # sequential platform calls by about 2s; the limiter's bounded wait is not a strict quota gate.
     # Relax this after real 429 evidence, or when smoothing can vary by endpoint. BYOK bypasses it.
     "wiza": {"limit": 30, "window_s": 60, "source": "docs"},
+    # Ocean.io documents 60/min and 1,000/day for self-serve API access. Pace the shared key at
+    # half the minute allowance; the free balance collector observes the separate daily counter.
+    "oceanio": {"limit": 30, "window_s": 60, "source": "policy"},
     # The Basic v2 docs set a shared one-request/second default. Several routes are exempt, but
     # provider-wide smoothing cannot express that difference, so shared-key service stays at 1/s.
     "limadata": {"limit": 1, "window_s": 1, "source": "docs"},
@@ -148,6 +162,9 @@ _RATE_LIMITS: dict[str, dict] = {
     # endpoint-specific Extract URL limits remain enforced by Octen.
     "octen": {"limit": 5, "window_s": 1, "source": "policy"},
     "linkup": {"limit": 10, "window_s": 1, "source": "docs"},
+    # Search, Extract and Entity Search each allow 600 requests a minute. Smoothing is
+    # provider-wide, so the shared key stays at one product's allowance.
+    "parallel": {"limit": 600, "window_s": 60, "source": "docs"},
     # Finance Research is 5/s; the other You.com APIs are 10/s. Smoothing is provider-wide.
     "you": {"limit": 5, "window_s": 1, "source": "docs"},
     # GET /account reports 50 queries/s for the current shared account. Pace the platform key to
@@ -180,8 +197,28 @@ _RATE_LIMITS: dict[str, dict] = {
     "leadsforge": {"limit": 120, "window_s": 60, "source": "headers"},
     "leadmagic": {"limit": 300, "window_s": 60, "source": "docs"},
     "crustdata": {"limit": 30, "window_s": 60, "source": "headers"},
-    "tikhub": {"limit": 30, "window_s": 1, "source": "docs"},
+    # The shared account's upgraded level: 100 RPS, honored only on the enterprise node (base_url).
+    "tikhub": {"limit": 100, "window_s": 1, "source": "policy"},
     "getleadsio": {"limit": 100, "window_s": 60, "source": "docs"},
+}
+# An endpoint whose upstream allowance differs from its provider's has its own bucket here. It
+# replaces the provider entry for that endpoint and does not draw from the provider's bucket.
+_ENDPOINT_RATE_LIMITS: dict[str, dict] = {
+    # Email Verifier publishes no limit; its 429s carry x-ratelimit-limit 20 per minute, far below
+    # the documented 1,000/min for other APIs. A provider-wide 20/min would slow every other route.
+    "contactout.people.email.verify": {"limit": 20, "window_s": 60, "source": "headers"},
+}
+
+# Calls in progress a provider allows on treg's own key (domain/capacity/fair_share.py shares them
+# between teams; BYOK calls bypass it). Only providers that publish or report such a cap belong here.
+_CONCURRENCY: dict[str, int] = {
+    # The key reports its concurrency room in every answer (usage.remaining_before.concurrent).
+    "crawl4ai": 500,
+    "hlrlookup": 210,
+    # The key status API reports its configured concurrency limit.
+    "litescrape": 25,
+    # treg's own conservative setting for the shared account (catalog row `limits`).
+    "fishaudio": 5,
 }
 
 

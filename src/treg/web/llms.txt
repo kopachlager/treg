@@ -78,7 +78,10 @@ resolves the tool by host and injects the credential:
   `treg` CLI does this automatically on a WAF 403 - you only need it over raw HTTP.
 - **Concurrency:** there is no per-token or per-team concurrency limit - fire calls in parallel
   (`Promise.all`, `asyncio.gather`); upstream I/O holds no request database connection.
-  Provider rate limits are relayed verbatim. If treg itself is saturated you get a
+  Provider rate limits are relayed verbatim. When a provider that caps calls in progress is fully
+  used on treg's key, its places are shared fairly: your call may wait briefly in line, and after a
+  short wait it is refused with a `429` `share_busy` (with `retry_after_s`, nothing billed) - retry
+  then, or use the routed tool (`treg.<job>`), which moves on to the next provider by itself. If treg itself is saturated you get a
   `503` with `{"treg_saturated": true}` and a `Retry-After` header - wait that long and retry the
   same request; nothing was billed. A bare 5xx with no JSON `detail` is never treg's own answer.
 
@@ -119,7 +122,10 @@ call that fails frees its key at once. Over MCP the same thing is the `idempoten
 A `409` means the original call with that key is still running: retry shortly. A `410`
 `idempotency_response_lost` means the original call completed and was charged but treg could not keep
 its answer; the body names the `call_id` and the charge, `GET /calls/{call_id}/result` may still have
-the answer, and a new key calls again. A `410` `idempotency_outcome_unknown` means the original call
+the answer, and a new key calls again. A `410` `idempotency_response_too_large` means the
+original call completed and was charged, and you already received its full answer, but it was over
+treg's 2 MB retry limit and was not kept: the body names the `call_id`, the charge and the size, and
+a new key calls again. A `410` `idempotency_outcome_unknown` means the original call
 stopped before its outcome was recorded and may have reached the provider: `GET /calls/{call_id}`
 shows what it cost, and a new key calls again.
 
@@ -177,6 +183,7 @@ Start from the job, not the vendor:
 
     treg catalog                                    # every platform, busiest first
     treg catalog search "backlinks for a domain"    # find endpoints by what they DO
+    treg catalog search --new                       # tools added in the last 30 days, newest first
     treg catalog get tikhub.tiktok.user.profile     # docs, params, PRICE, and how you'd be served
     treg call tikhub.tiktok.user.profile --query uniqueId=tiktok
     # raw HTTP: GET {BASE}/call/tikhub.tiktok.user.profile?uniqueId=tiktok  + X-Treg-Token
@@ -198,7 +205,8 @@ free of the balance rather than duplicating them.
 2. the org stored a secret for the provider → injected via a virtual tool;
 3. neither, and the endpoint has a verified public route → **no provider key**, free;
 4. otherwise → **treg's own key**, billed per call to the team's prepaid balance. Fractions of a
-   cent (a TikTok profile is ~$0.001); new verified accounts receive **$1.00 free once**, when creating an eligible team. No provider
+   cent (a TikTok profile is ~$0.001); new verified accounts receive **$1.00 free once**, when creating an eligible team (a team made
+   before verifying receives it at the first verified sign-in). No provider
    signup, no subscription.
 
 The anonymous price assumes the caller does not send a provider credential header. The faithful
@@ -265,13 +273,23 @@ the hub is off on this registry the ids answer 404: use the routed endpoints bel
 <!--/hub-->
 
 <!--routed-->
-**Routed endpoints — when you WANT treg to choose.** `treg.<capability>` rows (today:
-`treg.people.email.find`) are first-party endpoints generated from the providers of one capability.
+**For a common job, call the routed tool, not a provider you remember.** Scraping a page
+(`treg.web.extract`), web search (`treg.web.search`), Google results (`treg.google.serp.organic`,
+`treg.google.serp.maps`), finding or verifying an email (`treg.people.email.find`,
+`treg.people.email.verify`) and most social profiles have a `treg.<capability>` tool. treg picks the
+provider (your own key first), falls back when one fails or misses, and charges only the answer it
+returns. A provider you used last week may not be the best choice today: prices and reliability
+change. Name a provider only when you need fields or options that only it has.
+
+**Routed endpoints — when you WANT treg to choose.** `treg.<capability>` rows (for example
+`treg.web.extract`, `treg.web.search`, `treg.google.serp.organic`, `treg.people.email.find`) are
+first-party endpoints generated from the providers of one capability.
 `POST /call/treg.people.email.find` with `{full_name, domain}` (or `first_name`+`last_name`+`domain`,
 or `linkedin_url`) and treg runs the best child — your own keys first, then cheapest per hit — and
 answers `{output, raw, _treg: {served_by, tried, charged_micro}}` with `X-Treg-Served-By`. A
 provider error OR a miss falls through to the next provider, cheapest first, within
-`X-Treg-Route-Max-Cost` (default $1 per call; misses on per-success providers are free) — send
+`X-Treg-Route-Max-Cost` (default $1 per call; misses on per-success providers are free, others bill
+them, so a routed row quotes `usd_per_call: null` rather than $0 — cap bulk runs) — send
 `X-Treg-Route-Waterfall: 0` to stop at the first miss. When the provider that served could not
 apply a filter you sent, the answer says so in `X-Treg-Ignored-Filters` and `_treg.ignored_filters`
 (post-filter the rows, or say why they are off); send `X-Treg-Route-Strict-Filters: 1` to be refused
@@ -285,6 +303,22 @@ A found contact is not a confirmed one: an email or phone find is the provider's
 only `output.verified: true` means it checked the mailbox. Otherwise the answer carries
 `_treg.advice` naming the verify step (`treg.people.email.verify`, a fraction of a cent) — run it
 before outreach, and never re-send the same find: every hit bills, repeats included.
+Send `X-Treg-Route-Verify: true` on `treg.people.email.find` and treg checks every hit with
+`treg.people.email.verify` in the same call (your own verifier key first, then BounceBan), as its
+own charge inside `X-Treg-Route-Max-Cost`. The answer adds `_treg.verification: {verdict, checked,
+served_by, cost_micro}`, `verdict` one of `valid`, `invalid`, `catch_all`, `risky`, `unknown`.
+`checked: false` with a `reason` means no check ran and cost nothing; `pending: true` means the
+verifier is still working (its `call_id` is the async task). An invalid address is still returned,
+with its verdict. A miss is never checked (`checked: false`, `reason: no_hit`). Other routed tools refuse the header (422, unbilled).
+On `treg.people.phone.find` the same header checks the line with HLR Lookup's live network lookup
+(`hlrlookup.people.phone.verify`, your own HLR key first): `verdict` is `live`, `dead` or
+`unknown`. A live line is not proof the number is this person's; for a US number,
+`trestleiq.people.contact.verify` checks the name. A number not written internationally (`+` or
+`00` first) is not checked: `reason: not_international`, nothing charged, and `_treg.advice` says
+how to check it yourself (add the country code, or call `hlrlookup.people.phone.verify` with
+`input_format`, the ISO3 country code). treg adds `+1` to a bare
+10-digit number only when the provider itself marks it US or Canadian. A dead number is still
+returned, with its verdict.
 <!--hub-->
 `treg-hub.verified-email` does find + verify in one call and bills its fee only on a usable email.
 <!--/hub-->
@@ -335,6 +369,10 @@ terminal response, or one more catalog call that fetches it).
 - **Money:** reserved at submission, charged only when the task succeeds; a failed or moderated task
   refunds the whole hold. `treg audit`, `GET /calls` (`async_task`) and the dashboard Activity page
   show each task's state and, once done, the result link.
+- **Some async tools usually answer at once** (an email verification): a first response that is
+  already finished is the answer, charged as one, and `--await` prints it without polling. If it
+  says "still working", poll no faster than `interval` and stop at `max_age` seconds; a task with
+  no answer by then is refunded.
 - **Result URLs expire** (`ttl_note` in the descriptor; MiniMax ~9h). Download promptly; treg never
   stores generated media. Fetch-mode routes need one more call - `--await` prints that command.
 
@@ -366,7 +404,9 @@ Money notes for agents:
   `X-Treg-Cache: hit` with `X-Treg-Fetched-At` and `X-Treg-Age`. Your team's first call on a
   question costs full price either way; from your second call on, a hit costs 10% - and a hit on
   your own key is free. Send `Cache-Control: no-cache` to force a live call, or `X-Treg-Max-Age:
-  <seconds>` to accept only a younger answer. An idempotency replay is different
+  <seconds>` to accept only a younger answer. A team admin can opt the whole team out of the
+  archive (`treg org archive off`): new calls are then neither answered from nor stored in it,
+  so metered calls lose the repeat price. An idempotency replay is different
   (`X-Treg-Idempotent-Replay: true`). Empty results are the provider's own semantics — treg does
   not normalise "no data" vs "no coverage" vs "unsupported target".
 - Out of balance → HTTP **402** with a machine-actionable body: `balance_micro`,
@@ -378,6 +418,9 @@ Money notes for agents:
   when known and `alternatives` — other providers for the same capability; pick one, or use
   your own key for the provider (never affected). treg does not switch providers for you.
   treg re-checks the provider about once a minute, so a retry after a minute can succeed.
+- HTTP **503** with `error: provider_paused` → this treg deployment has paused that provider
+  (nothing charged, nothing sent to it). The `message` says why. Its endpoints are out of search
+  and the team's existing connection is kept; do not reconnect, it works again when resumed.
 - `treg balance` shows the prepaid balance and recent charges; the dashboard Activity page
   shows the exact settled cost of every call.
 
@@ -528,7 +571,7 @@ team, so nothing else is needed. `TREG_TOKEN=<TOKEN> …| sh` works too.
 Three human sign-in doors (email is the identity; the door just proves it):
 
 - **GitHub OAuth** - `treg login` (opens a browser).
-- **Email one-time code** - `treg login --email you@company.com` (a 6-digit code is emailed).
+- **Email one-time code** - `treg login --email you@company.com` (a 6-digit code is emailed; a server that requires a browser check finishes in the browser).
 - **Invite code** - `treg org join <code> --email you@company.com` (creates you + joins a team).
 
 Agents/CI use a token directly: `treg login --token <token>`. A dashboard "API key" bakes in the
@@ -575,7 +618,10 @@ A small tool set, the same for every client:
 job ranked by measured success (a provider or platform name lists what it offers). Read its
 `verdict`: `strong` means these do the job; `closest` means the nearest, read `catalog_get`
 before relying on one; `none` means the catalog has no tool for it, so file `catalog_request`
-instead of rephrasing; `keyword` means ranked by words alone.
+instead of rephrasing; `keyword` means ranked by words alone. To see recently added tools, give
+`catalog_search` `added_within_days` (1-365; 30 is a good default) and/or `sort: "newest"`; with
+either, `query` may be empty and the answer is a flat list of tools, each with its `added` day
+(UTC) and provider. Every result also carries `added`.
 <!--hub-->
 - `hub_create` · `hub_update` · `hub_mine` — publish a tool made of tools (the four files as fields; the check runs once on your balance; live on pass).
 <!--/hub-->
@@ -678,6 +724,8 @@ are both supported; you do not need to pre-arrange anything with us.
                                                   bulk on-ramp: scan a .env AND/OR a skills folder,
                                                   auto-register everything you pick (see Upload below)
     treg oauth connect <name> --client-secret S --scopes <scope…>   mint an auto-refreshed OAuth cred
+    treg connections connect --provider P [--key-stdin]             connect a key-based provider: hidden
+                                                  prompt, or the key piped on stdin (verified first)
     treg health [--run]                           validate every secret against its tool's health check
     treg admin stats | orgs | users | grant <user_id> | …           super-admin (cross-tenant)
 

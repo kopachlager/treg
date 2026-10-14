@@ -2,6 +2,7 @@
 title: Money — prepaid balance, the ledger, Stripe, and the reports that check it
 status: shipped
 sources:
+  - src/treg/policy.py
   - src/treg/catalog/tavily.yaml
   - src/treg/catalog/tinyfish.yaml
   - tests/test_tinyfish.py
@@ -27,19 +28,32 @@ sources:
   - src/treg/application/referrals.py
   - src/treg/domain/governance/budgets.py
   - src/treg/infra/__init__.py
+  - src/treg/infra/money_admission.py
+  - src/treg/infra/money_session.py
+  - src/treg/application/hub/runner.py
   - src/treg/infra/stripe.py
   - src/treg/reconcile.py
+  - src/treg/application/key_spend_rollup.py
+  - src/treg/alembic/versions/0070_api_key_spend_rollup.py
+  - tests/test_key_spend_rollup.py
   - src/treg/domain/referrals.py
   - src/treg/api.py
   - src/treg/application/signup.py
   - src/treg/domain/identity/promotions.py
   - src/treg/alembic/versions/0033_signup_promo_eligibility.py
+  - src/treg/alembic/versions/0071_signup_promo_claim.py
   - src/treg/routers/admin.py
   - src/treg/routers/billing.py
   - src/treg/routers/call.py
   - src/treg/routers/orgs.py
   - src/treg/routers/referrals.py
   - tests/test_call_architecture.py
+  - tests/test_money_lock_order.py
+  - tests/test_money_admission.py
+  - tests/test_money_admission_application.py
+  - tests/test_money_admission_postgres.py
+  - tests/test_archive_batch_postgres.py
+  - scripts/bench_money_admission.py
   - tests/test_marketplace_call.py
   - tests/test_asynctasks.py
 related:
@@ -108,22 +122,43 @@ and owns the commit that lands it; neither adapter reaches into the ledger.
 
 `application.signup._grant_signup_promo` calls `identity.promotions.claim_signup_promo` for the
 creating user's ID. A conditional UPDATE consumes `User.signup_promo_available` only for a verified,
-active, non-demo user. It commits in the same transaction as `ledger.grant(once=False)`, the block,
-balance and entry; failed commits roll everything back. Ledger metadata records `source=signup`
+active, non-demo user, then inserts the user's inbox into `SignupPromoClaim`, whose primary key
+refuses a second claim for one mailbox. It commits in the same transaction as
+`ledger.grant(once=False)`, the block, balance and entry; failed commits roll everything back. Ledger metadata records `source=signup`
 and the claiming `user_id`. The ordinary per-org `grant(once=True)` check is not the concurrency
 arbiter and manual/referral grants retain their own semantics.
 
 `User.email_verified_at` is set only by successful OTP, verified social login or an inbox-only
 invitation link. Legacy `/users` and admin-visible invite codes do not prove email ownership. An
-unverified account may create teams with zero signup credit; after verifying it may claim once on
-a subsequently created eligible team. Existing teams are not automatically backfilled. The grant
+unverified account may create teams with zero signup credit. The sign-in that first verifies it
+(`find_or_create_user(..., proven=)`, then `signup.grant_signup_promo_on_proof` after that commit)
+offers the claim to the oldest eligible team it owns, through the same `_grant_signup_promo`
+(decision point, claim and grant) without a second ad conversion; with no owned team, it claims on
+its first eligible team. Later sign-ins never re-offer it: a proof-time grant that fails or is
+interrupted leaves the user eligible for their next team, exactly like a failed team-time grant. The
+grant
 amount is `promo_grant_micro` (default 1,000,000); zero skips the claim as well as the credit.
+
+Before claiming, `_grant_signup_promo` asks the `signup_credit` decision point
+([policy extensions](policy-extensions.md)) for a user who could claim. Without an installed
+extension it always grants, and a slow or failing extension also grants (and is reported). A
+`defer` skips the claim and writes nothing, so the user stays eligible for their next team.
 
 Revision `0033` defaults historical users and old writers to ineligible without scanning potentially
 deleted team ledgers. New application User rows explicitly start eligible. Verification never resets
 eligibility. Team deletion, leaving and ownership changes cannot restore it because it lives on the
 user. Administrative deletion of the user also deletes this marker; this is an account-level guarantee,
 not a permanent per-email denylist or proof that separate accounts belong to different humans.
+
+The inbox is `promotions.promo_inbox(email)`: lowercased, the domain's trailing dots dropped,
+`+tag` subaddressing dropped for every domain, and for `gmail.com` / `googlemail.com` the dots removed and the domain folded to
+`gmail.com`. Each alias is still its own login and `User`; only the gift is shared, and a user
+whose inbox was already claimed through another alias loses its own eligibility in the same
+UPDATE. The claim row has no FK and outlives the user, so account deletion does not free an inbox.
+This stops one mailbox from verifying many accounts; it does not stop someone holding many real
+mailboxes or a catch-all domain. Revision `0071` seeds the table from every user already verified
+and no longer eligible (a superset of real claimants) and is a rollback floor: dropping it would
+reopen a gift to every alias of an already-gifted inbox.
 Existing balances and all five money operations are unchanged. During rollout or application rollback,
 keep automatic credit disabled until every serving instance enforces the new rule; old code still
 awards per team even after this additive migration.
@@ -212,11 +247,164 @@ marketing expense and never refundable; purchased credit is a deferred-revenue l
 refundable and disputable - so spending promo first keeps the refundable pool as small as possible
 for as long as possible.
 
-`_consume_blocks` acquires `CreditBlock` row locks with `ORDER BY CreditBlock.id FOR UPDATE`.
-The unique primary-key order is shared by concurrent settlements and prevents opposite scan-order
-locking. It is independent of consumption priority: the subsequent `blocks.sort` still selects
-promotional credit first, then age and ID. Keep both the row lock (which prevents lost deductions)
-and that business sort. This is the repository's sole explicit CreditBlock row-lock query.
+`_consume_blocks` uses `_lock_blocks` to acquire `CreditBlock` row locks with
+`ORDER BY CreditBlock.org_id, CreditBlock.id FOR UPDATE`. The query refreshes any objects already
+in the session's identity map from the locked rows, so a previously read balance cannot overwrite
+a concurrent committed deduction. Lock order is independent of consumption priority: the
+subsequent `blocks.sort` still selects promotional credit first, then age and ID.
+
+### Composing money operations without reversing locks
+
+A single settlement claims its Hold, locks its blocks, and updates Org only when the refund or
+daily-spend delta requires it. Reserve and release keep their existing balance-update timing;
+there is no general Org lock at the start of every money operation.
+
+Several closes in one transaction must use `close_holds_in_transaction` with `HoldClose` items.
+The helper claims all Hold IDs in sorted order before taking any block or balance locks, then
+locks all blocks needed by positive settlements in the order above. It applies the closes in Org
+ID order while preserving each org's original operation and consumption order. It reuses the
+locked block collection: querying again after a balance update could lock a concurrently added
+block in reverse order. Duplicate Hold IDs keep the first operation and later occurrences return
+zero, just as repeated conditional claims did. The caller still owns the one commit or rollback;
+enter this helper before other money writes in the transaction.
+
+`close_deferred` uses that helper, then passes its archive-use marks together to
+`archive.note_org_uses_in_transaction`. The writer combines repeated keys and performs bounded
+upserts in `(org_id, key_hash)` order in the same transaction, reducing database round trips
+after balance locks have been acquired. Every repeated mark still increments the usage counter;
+failure in any chunk rolls back the charges and all marks. Mark ordering also matters for
+zero-cost batches, which may acquire neither block nor balance locks. Cancellation
+compensation closes the parent and overflow holds through the same batch helper.
+
+Hub payments consume the payer's blocks before balance writes. If both payer and payee need a
+balance update, `settle_to_in_transaction` acquires those Org rows in ID order with
+`FOR NO KEY UPDATE`, compatible with foreign-key checks. An exact-cost payment does not add a
+payer balance lock. Referral payouts likewise stage their actual grants in Org ID order; their
+existing claim and payout commit boundaries remain separate.
+
+Real PostgreSQL tests exercise competing batches, single settlements, transfers, claims and
+rollbacks. These rules cover the application compositions above, not arbitrary transactions that
+write other tables first. During rollout, retire old batch and cross-org writers before relying
+on consistent ordering. Lock ordering removes these circular waits; it does not bound the time
+a slow transaction may hold a lock.
+
+Public money entries attach local transaction identity and stage labels through
+`infra.money_trace`, without extra queries or earlier connection acquisition. Application call
+scopes additionally label preflight and bookkeeping after settlement. Active slow-transaction
+snapshots can correlate a PostgreSQL blocker PID to an open money transaction before it finishes;
+the actual commit/rollback boundary, rather than the public function return, ends the trace.
+See [transaction diagnostics](data-model.md#product-analytics-writer-analyticspy) for coverage,
+bounded logging, worker lifecycle and evidence limitations. Tracing changes neither lock order
+nor accounting behavior.
+
+### Optional admission before the settlement session
+
+`infra.money_admission.admit` optionally queues same-org balance work by payer Org before the
+application opens a database session. A process-local async lock limits Redis polling within that
+process; contended Redis acquisition retries after a random 3–10 ms async delay. A token-owned,
+expiring Redis lease coordinates participating processes. Multi-org batches
+acquire eligible Org leases in sorted ID order. The scope surrounds session acquisition, ledger
+work, commit or rollback, and session cleanup; it releases leases only after that scope exits.
+`infra.money_session.money_session` joins the session's close/rollback task even under repeated
+cancellation before allowing the admission scope to exit, then propagates cancellation or the
+original failure. It does not introduce a commit or change the application's commit boundaries.
+Waiting for admission holds no database connection.
+
+`money_admission_wait_s` accepts `0 < wait <= 120` seconds and still defaults to five.
+One acquisition deadline covers local-lock waiting and all Redis acquisition attempts; reaching
+Redis does not restart the budget. This is a per-admission wait, not a total call deadline: a
+request can reserve and later settle through separate admission scopes. Cleanup and database
+execution require additional time. The default 15-second lease is independent of queue waiting;
+it starts with a successful acquisition attempt and renews at TTL/3, including while acquiring
+later orgs in a batch. Longer acquisition waits do not require a longer lease TTL.
+
+The application supplies the already-known payer identity through `MarketplaceCall` and
+`DeferredSettle`, an asynchronous task snapshot, the Hub caller, or the org on a reserve.
+Skip-direct overflow does not reserve a parent and does not write `payer_org_id` on that
+parent. Before that child can be reserved, and again before overflow cancellation cleanup,
+the authenticated caller's org is required. That org admits the release of `{call_ref}` and
+`{call_ref}:overflow`. A missing caller refuses before checkout.
+The gate covers ordinary positive settlements (`close`), charged deferred batches (`deferred`),
+potentially billable asynchronous terminal settlement (`async`), the Hub payer's positive seller
+payment (`hub`), balance-row reserves (`reserve`), and balance-row release, refund, and cancel
+(`release`). A deferred batch that draws blocks keeps operation `deferred` and also leases every
+payer that same session refunds. A batch or close that only releases or refunds uses `release`.
+Async admission is conservative: the locked task row still decides whether and how much to charge,
+and a release discovered only after that lock stays inside the admit already taken. Missing usage
+skips admission only for a non-expired success or billed failure that keeps the hold. A failure,
+including one observed with `require_usage`, and any terminal state already past the window,
+admits as `release` before the session that returns the hold. One admit wraps
+the session; nothing inside it calls `admit` again. The lease ends after the session closes and
+before upstream work. A reserve loads the org for auto-top-up inside that session and schedules
+the refill only after the lease is released. Grants, top-ups, signup credit, referral payouts, and
+billing auto-top-up do not acquire this gate. A Hub payee is not an additional admission key. Direct ledger callers retain
+their existing database behavior.
+
+`require_balance_orgs` refuses an empty, missing, or non-positive org before checkout on every
+application session that will touch a balance row. `admit` does the same for operations `reserve`
+and `release`, and does not yield into the body. That refusal is not a fallback and not an HTTP
+429. Wait timeouts and key-value failures still enter the original database path for every
+operation, including `reserve` and `release`.
+
+The feature defaults off; `money_admission_org_ids` selects an opt-in subset, or all orgs when
+empty and enabled. Non-selected operations supply the disabled timing baseline. Admission never
+replaces Hold claims, CreditBlock locks or transaction atomicity. For `close`, `deferred`, `async`,
+and `hub`, a missing identity, unavailable Redis, or expired acquisition budget releases any
+partially acquired gates and executes the original database path. `reserve` and `release` share the
+Redis and wait-budget fallback, but a missing identity refuses instead of executing that path.
+Lost renewal does not cancel or restart a money transaction already in
+progress. These fallback paths preserve database correctness but give up admission isolation; they are
+counted separately and are not a successful rollout. Owner-checked renewal and deletion prevent an old lease holder from extending
+or deleting a newer owner's lease. TTL and renewal cannot prove that an old database transaction
+has stopped, which is why database locks remain necessary.
+
+The shared Redis client's socket and connection timeout defaults are one second; optional
+counters and health probes keep a separate 200 ms outer deadline. Acquisition
+has a 1.5-second outer deadline; an unavailable result is not retried because SET may already
+have succeeded. The gate records its token before SET and cleans up unobserved acquisitions.
+The admission queue wait and lease TTL settings are independent of these command budgets.
+
+Renewal retries a transient timeout/connection failure once with the same owner-checked
+`PEXPIRE`: it cannot recreate an expired key or extend a successor's token. Each attempt has
+a 1.5-second cooperative deadline within a shared 2.5-second budget. The gate passes the earliest
+confirmed expiry of all held leases into `renew_lease`, which checks this absolute deadline
+before each EVAL and caps each attempt's timeout by the remaining budget. A late transient
+error or a timeout translated by driver cleanup cannot start another attempt after that deadline;
+these checks cannot preempt an already-running command or a scheduling pause. A minimum
+three-second lease renewed at TTL/3 has at most two seconds of confirmed validity remaining,
+so that validity bound can shorten the retry rather than allowing the full command budget.
+Permanent errors, cancellation and confirmed ownership loss do not retry. The gate
+counts validity from each acquire/renew request's start, not its reply; after a scheduling pause
+it checks this deadline before renewing or entering the session. A renewal reply observed after
+the previous deadline marks isolation lost even if Redis accepted the extension. It never
+reacquires, cancels the transaction or releases the local gate before session cleanup. Failed
+attempts remain in the existing KV diagnostics even when the retry recovers.
+Confirmed validity exhausted before an attempt, by its validity timeout, or by the gate's outer
+timeout reports `deadline_expired`, not KV unavailability. The admission summary counts it once
+per scope alongside `lease_lost`, without increasing `kv_errors`. Actual command failures still
+retain their diagnostic rows if the validity deadline also expires during failure cleanup.
+
+Lease cleanup retries a transient timeout/connection failure at most once, always with the same
+token-checked Lua delete. Each attempt keeps its 1.5-second deadline within a shared 2.5-second per-key
+budget; authentication/permission errors and cancellation do not retry. These are asyncio time
+budgets, not hard wall-clock guarantees under scheduler stalls or cancellation cleanup. Multiple
+Org leases are cleaned up in reverse order, so a batch's cleanup budget scales with its keys.
+A retry finding no matching token reports `not_owned`: an earlier delete may have succeeded
+without its response, or the lease expired/changed owners. It cannot delete a replacement owner's
+lease and does not manufacture a new lease-loss observation. Repeated failures leave expiry as
+the backstop. Cleanup still follows database session closure and never repeats accounting or
+upstream work. The admission acquisition budget still defaults to five seconds; cleanup is observed
+separately from execution in the existing scope totals.
+
+This is best-effort contention isolation, not a global money concurrency cap, durable queue or
+promise of FIFO across processes. Serializing the entire application session also serializes work
+such as Hold claims and session cleanup that previously could overlap; even without polling
+delay, hot-org throughput can regress. Moving waiters out of the database reduces their connection
+occupancy, not necessarily their total latency. Redis round trips add cost, and fallback traffic
+can still exhaust the original pool. It neither increases a hot org's serial settlement capacity
+nor bounds an existing transaction's lock duration. Default-off, per-org rollout and measured
+end-to-end performance are therefore part of adoption. See [deployment controls](../ops/deploy.md#optional-money-admission)
+and [aggregate telemetry](data-model.md#product-analytics-writer-analyticspy) for rollout and measurement.
 
 **Margin is applied inside the module** (`with_margin`), at reserve AND settle, and the rate in force
 is recorded on every entry - so a rate change cannot retroactively rewrite what a call cost, and two
@@ -229,7 +417,7 @@ stale holds is paid by the caller who benefits from it, and an org that never ca
 balance to strand. Each stale release commits independently before the new balance gate. A later 402
 rolls back only the failed reservation, never a refund the reaper already made durable.
 Pending `AsyncTaskRecord` holds are excluded from this short request reaper. Their worker has a separate
-24-hour deadline and always closes the hold by settle or release.
+24-hour deadline (or the descriptor's shorter `max_age`) and always closes the hold by settle or release.
 
 ## Deferred asynchronous settlement
 
@@ -240,20 +428,31 @@ the field's declared `min`/`max` (finite and always positive, whatever minimum i
 matches no row and prices at the fallback, so a caller can neither reserve zero nor bill past the
 validated ceiling. Both the normal response path and the async worker
 use it. Provider differences remain in catalog YAML; there are no provider billing adapters.
+An async row settles at the terminal answer when its price is a table, a `usage` meter, or a plain
+`per_call` price (`observed` amount, the fixed price as fallback): a provider that bills every
+finished answer is charged for each one, a finished answer with no result included. Async
+`per_success` rows without a table keep settling on the submission response.
+
+A submission whose own status is already a success word, on a descriptor with
+`terminal_on_submission`, is not deferred: it settles on the response through the ordinary path.
 
 For a tier-4 endpoint carrying `async`, a successful submission keeps its hold and writes an
 `AsyncTaskRecord` whose `settlement_basis` freezes the whole price rule with the request it was
 applied to, so the settlement replays from the row alone. BYOK calls create neither hold nor task
 row. An authorized caller poll and the fallback worker share `_finish_terminal`: terminal 2xx
-evidence settles the original task once under its row lock. Caller success without required usage
-only learns result ownership and leaves the hold for a later observation; worker fallback retains
-its reserve-based settlement with a reconciliation alert. Settlement errors leave the provider
-response unchanged and cron retries. Only the winning finalizer archives terminal evidence.
+evidence settles the original task once under its row lock. An unexpired caller success or
+billed failure without required usage only learns result ownership and leaves the hold for a
+later observation. A failure, or a terminal state already past the window, releases the hold
+under admission. Worker fallback retains its reserve-based settlement with a reconciliation alert.
+Settlement errors leave the provider response unchanged and cron retries. Only the winning
+finalizer archives terminal evidence.
 For a successful task, the same transaction stores the terminal adapter hit verdict on the task;
 a confirmed terminal failure stores `false` when the endpoint has verified hit rules, while
 pending and timed-out tasks remain undecided. This counts failed attempts in routing's hit rate.
 The audit path copies the verdict to the original submission row whether that row was inserted
 before or after the terminal poll. The submission ticket itself supplies no hit verdict.
+A successful task also stores the contract's verdict word (`AsyncTaskRecord.verdict`), copied the
+same way; a failure carries none. Neither moves money.
 An async status declared as `billed_failure` is still presented as failure by the CLI, but the
 worker settles its usage evidence and records the terminal outcome; this covers cancellation after
 billable work without manufacturing a successful result.
@@ -278,8 +477,10 @@ other non-2xx, the same rule the CLI applies). Valid nonterminal responses reset
 failures and use the normal interval, capped at 60 seconds. HTTP errors, invalid JSON and timeouts
 increase a persisted failure counter with 2/4/8/15-minute backoff, capped at the task deadline.
 These are eligibility delays; the two-minute cron cadence determines the actual next check.
-There is no provider-wide circuit breaker. **At the 24-hour
-deadline it releases the hold in full**, marks the row `timed_out` with `reconcile_review`, and logs
+There is no provider-wide circuit breaker. A descriptor's `max_age` caps the polling window below 24
+hours; a terminal answer that a caller poll still sees while the row is pending settles normally,
+because the 24-hour bound alone overrides a terminal outcome. **At the deadline (24 hours or
+`max_age`) it releases the hold in full**, marks the row `timed_out` with `reconcile_review`, and logs
 an ERROR-level alert: an outcome nobody observed is the platform's cost, never the customer's, and a
 provider that silently changed its status field shows up as absorbed timeouts in
 `reconcile.async_task_settlement` (`absorbed_timeouts`) rather than as a quiet overcharge.
@@ -302,7 +503,10 @@ no task id / an off-allow-list poll URL: `application.call.service._submission_r
 becomes a row: it settles at zero on the request path and the caller sees the body and `$0`. The
 worker never lets one row abort a tick (`_process` catches everything, `settle_due` gathers with
 `return_exceptions`), because an unset platform key for one provider must not stall every other
-provider's settlements. An overflow child (`application.call.overflow._child`) carries its own
+provider's settlements. Each tick loads the catalog once, in a thread, before any poll starts
+(`settle_due`): the first catalog read in a fresh worker process parses every provider file, and
+inside a poll that parse blocked the event loop past `POLL_TIMEOUT_S`, so polls timed out with a
+fast provider. The poll timeout therefore measures the provider alone. An overflow child (`application.call.overflow._child`) carries its own
 observed-kind basis at the aggregator price, so an aggregator that reports no cost settles at the
 aggregator reserve, not at the parent's price. A `settle: usage` row reserves what its rate-card table says THIS request costs
 (the matrix ceiling had made a $0.05 call demand a $6 balance) and settles the provider's reported
@@ -432,9 +636,12 @@ without that split would have rejected the default $5 threshold on every enable.
 **A saved card arms a consented policy from either webhook.** The modal records consent first
 (`set_autotopup` → `no_card`) and relies on the top-up Checkout to save the card, so there is no
 SetupIntent in that flow: `_set_default_pm` - called by both `_on_checkout_completed` and
-`_on_setup_succeeded` - runs `_arm_if_waiting_for_card`, which turns the policy on only from the
-explicit `no_card` state. A decline, 3DS, or a deliberate off (reason `None`, consent still on
-file) stays off; a redelivered payment webhook must not switch a policy back on.
+`_on_setup_succeeded` (and `_on_payment_succeeded`) - runs `_arm_if_waiting_for_card`. It turns
+the policy back on from `no_card` once a card exists, and from repeated declines
+(`max_attempts:*`) only when the card is proven: it just paid (`paid=True`, both payment webhooks)
+or it is a newly saved card. The declined card saved again is not proof. 3DS
+(`authentication_required`) and a deliberate off (reason `None`, consent still on file) stay off;
+a redelivered payment webhook must not switch a deliberately disabled policy back on.
 
 Turning `invoice_creation` on makes Stripe emit `invoice.created` / `invoice.paid` for every top-up.
 `handle_webhook_event` drops them, deliberately: crediting on an invoice event as well as on the
@@ -465,6 +672,15 @@ cooldown stamped in the DB *before* the charge so a second web worker sees it, a
 limit, and an idempotency key derived from the threshold crossing - so a burst of concurrent calls
 that all notice the low balance produces exactly ONE charge.
 
+The wait between charges (`billing.autotopup_wait_s`) is one hour after a FAILED charge
+(`autotopup_cooldown_s`), else one hour divided by the team's `autotopup_max_per_hour` (0 = the
+default `autotopup_default_per_hour`, 5; 1-60 via `POST /billing/autotopup` `per_hour`, `treg topup
+--per-hour`, or the billing page). The number is part of the mandate text. A call refused for
+balance also calls `maybe_schedule_autotopup` (`reserve.py`, one read of the org by primary key):
+before this only a call that got through did, so a team at $0 stayed empty until something else
+ran, refusing every call meanwhile. The scheduler checks the wait in memory first,
+so a team refusing thousands of calls an hour does not start a task per call.
+
 Authorization splits by WHAT, not by who. `_billing_org` (the `/billing/*` routes - cards, top-ups,
 auto-top-up policy, payment history, the portal) requires **admin or owner**: a card, a spend policy
 and an invoice archive are the org's money, not a member's preference.
@@ -477,7 +693,7 @@ admin-only, which meant a machine identity could not read the balance it was spe
 (Reported by Jason, 2026-08-07.)
 
 The 402 also carries `autotopup_enabled` and an `auto top-up:` line in `message`. Off → the one
-command that turns it on. On → the amount, threshold, cooldown and monthly cap, plus the flags that
+command that turns it on. On → the amount, threshold, charges per hour and monthly cap, plus the flags that
 raise them - because a team that is out of money *with* auto top-up on is being held by the cooldown
 or the cap, and "add funds" alone reads as "auto top-up is broken" (cobl.ai, 2026-08-25: ~1,500
 refusals between hourly $20 refills against a $60/day burn). The org fields are read **before**
@@ -515,6 +731,44 @@ Two aggregations happen in Python rather than SQL on purpose - the ledger's prov
 `meta` column (portable JSON extraction across SQLite and Postgres is not worth a report), and these
 are admin-scale windows over a bounded number of metered calls, the same tradeoff `admin_stats` makes.
 
+## Spend per API key (`application/key_spend_rollup.py`)
+
+What each API key spent is ledger money, attributed through the audit row. The ledger's `settle`
+entries are the only money; `CallRecord.call_ref` (the ledger `call_id` of a metered call) supplies
+only the key. A routed attempt (`<ref>:r1`) or an overflow hold (`<ref>:overflow`) settles under a
+suffixed id whose own audit row may not exist, so it falls back to the part before the first colon.
+The audit row must belong to the same team. A charge with no keyed audit row (a dashboard session,
+an MCP connector login, a hub run, a call from before keys were recorded, or a row `audit.py` shed)
+lands on the team's one **not attributed** line. Per-key lines plus that line equal the ledger.
+
+No page computes this. `treg-worker spend rollup`, a cron, folds new settle entries into
+`ApiKeySpendDay`: team + API key (`0` = not attributed) + tool (the entry's `endpoint_id`) + UTC
+day -> `spent_micro` and `charges`. `charges` counts settle entries with money, not calls: a
+routed call or an overflow hold settles more than once. The fold:
+
+- walks the ledger in `(created_at, id)` order from a persisted watermark (`ApiKeySpendCursor`;
+  ledger ids are random, so the id alone cannot be a cursor), over the `created_at` index, with the
+  watermark as the scan's lower bound (`created_at >= watermark AND (created_at > watermark OR
+  id > watermark_id)`), never inside one OR that the planner cannot bound;
+- leaves entries younger than a few minutes for the next run: the audit row that names the key is
+  written after the settle, through a queue;
+- reads small batches, each in its own short transaction: lock the cursor row, read the entries,
+  look their keys up by `call_ref IN (...)` in small chunks over its index, add to the day rows in
+  the database (`spent_micro = spent_micro + ...`), move the watermark, commit. The row lock
+  serializes overlapping runs, so an entry is never folded twice;
+- starts its history 31 UTC days back and is capped per run (`--max-rows`), so the first backfill
+  catches up over several runs. Until it has caught up once, the pages say spend history is being prepared.
+
+Once a UTC day, after a run that caught up past midnight, the last two complete days are recounted
+per team from the ledger (over `(org_id, created_at)`) and REPLACE that team's rows for those days.
+That repairs a settle committed after the fold had passed its timestamp, and an audit row that
+landed after the lag. A recount that differs from the fold is logged as a warning. A recount can
+outlast one cron interval, so it is a lease on the cursor row, taken before any team is read: a
+run that finds another run's live lease skips it. Each team's rows are replaced in one transaction
+that re-checks the lease under the row lock and records the team as done, so a later run resumes
+after it and two runs never replace the same team. One run spends at most `--max-recount-seconds`
+on it (at least one team), and a run that dies holds the lease only until it expires.
+
 ## Call settlement and provider evidence
 
 The metered path is `_platform_offer` → spend caps → `ledger.reserve_in_transaction` →
@@ -532,7 +786,7 @@ Provider-specific calculation stays outside the faithful relay.
 | Tavily Crawl | Platform calls require the same 1-20 limit. Reserve per returned extraction at 0.3 credit (Basic), 0.4 (Basic + instructions), 0.5 (Advanced), or 0.6 (Advanced + instructions), then settle valid extracted entries in `results`. This is a conservative deterministic allocation, not the exact Tavily account charge: the response does not expose every page successfully mapped before extraction. treg absorbs any hidden mapping difference, bounded by the 20-page platform cap. Grouped `usage.credits` is ignored and BYOK remains unmetered |
 | Octen search and extraction | Reserve the documented maximum from `count`, Broad `max_queries`, optional full-content results, News subjects, or Extract URL count at the advanced rate. Settle Web and News from the call base plus `meta.usage.full_content_extra_count`, Broad from `num_search_queries` plus extras, and Extract from `successful_by_mode`. Missing, malformed, or over-ceiling usage keeps the frozen hold; failed HTTP responses release it. Rates are frozen from `cost.octen_rates` before relay. Own-key calls remain unmetered and have no platform request cap. |
 | Legacy reported charge | DataForSEO `cost`, ScrapeCreators and Dropleads finder/verifier `credits_charged`, Akta and Dropleads person enrichment `credits_consumed`, Dropleads company `credits.creditsDeducted`, Lusha `billing.creditsCharged`, Exa `costDollars.total`, and Prospeo bulk `total_cost`; credit amounts use the catalog FX rate |
-| Crustdata, cloro, AI Ark | Read the charge from a response header through `_CREDIT_HEADERS` using the same FX rate. Crustdata `X-Credits-Used` and cloro `X-Credits-Charged` are positive charges; AI Ark `X-Credit` is a negative debit and declares an explicit -1 multiplier. Invalid signs and non-finite values are ignored. cloro omits the header on its free routes and on a failed extraction, neither of which it bills, so an absent header settles at the estimate, not at zero |
+| Crustdata, cloro, AI Ark, Crawl4AI | Read the charge from a response header through `_CREDIT_HEADERS` using the same FX rate. Crawl4AI `x-c4-cost` is a positive charge in credits; its streamed batch and its jobs settle by `settle: usage` instead (`summary.cost` on the stream's last line, read by `settle._usage_document`; a finished job's `usage.cost`), and a usage figure written as a decimal string (`"0.500"`) is read as a number. Crustdata `X-Credits-Used` and cloro `X-Credits-Charged` are positive charges; AI Ark `X-Credit` is a negative debit and declares an explicit -1 multiplier. Invalid signs and non-finite values are ignored. cloro omits the header on its free routes and on a failed extraction, neither of which it bills, so an absent header settles at the estimate, not at zero |
 | cloro reserve | `cost.value` is the full-surface `test_request` price (ChatGPT 9, Google SERP 7); the plain call settles lower from the header (verified live 2026-09-07 at the then-Lite rate: reserve 7,200 µ$, settled 5,600, refunded 1,600; at the Hobby rate 3,600 → 2,800, re-verified 2026-09-14). The top-level `state` body field is a `cost.modifiers` rider (+2 credits) reserved through the same generic path Aviato uses, which is open to any credit-priced provider with a FX rate |
 | Apollo | Known empty organization results are free |
 | Tomba domain search | Non-empty pages cost ceil(`meta.pageSize` / 10) credits, even when partially filled; empty `data.emails` is free. Reservation uses requested `limit`, default 10. Missing/malformed page evidence falls back to the estimate. Upstream duplicate discounts are not detected |
@@ -541,12 +795,13 @@ Provider-specific calculation stays outside the faithful relay.
 | Hunter email finder | One whole credit when an email is present; a known miss is free |
 | TikHub | Honor explicit no-charge prose; an embedded error that says it is charged still costs the estimate |
 | Bright Data | Count delivered JSON-array records or CSV/NDJSON lines; a JSON object containing a status/snapshot handoff has zero records |
-| Aviato | Fixed routes use the estimate; bulk enrichment counts successful records; catalog `settle: base` and `settle: modifiers` release documented-but-unbilled `reserve_only` riders |
+| Aviato | Fixed routes use the estimate; bulk enrichment counts rows with `lookupSuccessful: true` (a failed lookup answers `{"lookupSuccessful": false}` and is free, as is a `null` row); catalog `settle: base` and `settle: modifiers` release documented-but-unbilled `reserve_only` riders |
 | Datagma | A finite nonnegative `creditBurn`, including numeric strings and zero, settles at that many frozen-price credits; invalid or absent evidence falls back to normal settlement |
 | ZeroBounce | The verified `per_success` adapter treats `status=unknown` as a zero-cost miss; other completed verdicts settle at the frozen one-credit estimate |
 | CompanyEnrich people search | Rows in `items[]`, floored at 1 (the documented 2-credit minimum on an empty page); each row is 2 credits (`_rows_billed_micro` scales `unit_micro` by the row's `cost.value`), capped at the reserved `pageSize` |
 | Icypeas bulk (`profile.url.bulk`, `people.identity.resolve.bulk`, `scrape.bulk`) | Rows in `data[]` whose `status` is `FOUND`; a company scrape (`type: "company"` in the request body) bills at 0.5 credit a hit, other bulk rows at 1 credit; `NOT_FOUND` rows are free |
 | Serpstat | An `error` envelope (bad token, exhausted limit, "Data not found") is free; otherwise rows in `result.data[]`, or `result.data.top[]` for `getKeywordTop`, floored at the documented 1-credit minimum on an empty list; any other response shape settles at the estimate |
+| SpyFu | Rows in `results[]` at the per-row price, capped at the hold; an empty list is free and any other shape settles at the estimate |
 | TheCompaniesAPI companies search | `simplified=true` is free on endpoints that declare it in `input.queryParams`; otherwise one credit per company in `companies[]`, capped at the requested `size` |
 | Findymail employee search | One finder credit per contact in the returned list (`_rows_billed_micro`); an empty list is a free miss where the estimate used to bill the hold |
 | You.com Contents | Reserve for each requested URL, then count objects in the returned bare array at the frozen per-page price, capped at the hold. An unreadable response keeps the estimate. Search modes that may trigger live page fetches stay BYOK because the response does not identify the billed pages |
@@ -561,7 +816,7 @@ Multiplying it by `unit_micro` billed a 30-credit Datagma phone lookup as 900 cr
 
 The row-count signal for that estimate (`resolve._LIMIT_PARAMS` / `_body_limit`) reads the caller's
 `limit`/`count`/`size`/`per_page`… in the query or body, the camelCase spellings (`pageSize`,
-`numResults`, `perPage`, `maxResults`, lusha's per-company `contactsLimit`), a nested `pagination.{size,…}`, and — for providers that
+`numResults`, `perPage`, `maxResults`, lusha's per-company `contactsLimit`, SpyFu's one-row-per-month `pastNMonths`), a nested `pagination.{size,…}`, and — for providers that
 bill one row per listed item — the length of `targets`/`keywords`/`domains`/`urls`/`lookups`/
 `emails`. Each of those was a live overcharge first (2026-08-28: companyenrich `pageSize: 2`
 settled 20 rows, moz's one `targets` entry settled 20 quota rows; 2026-09-02: lusha decision-makers,
@@ -907,7 +1162,9 @@ resolution - and both are listed in the dataplane write allowlist on their own
 `MarketplaceCall.max_cost_micro` carries the caller's remaining ceiling. `_platform_reserve`
 checks the actual reservation estimate with margin before opening its transaction or creating a
 hold. Direct calls only set it when the caller supplies `X-Treg-Route-Max-Cost`; routed children
-always inherit their route's remaining ceiling, including its default. A refusal is a 402
+always inherit their route's remaining ceiling, including its default. A routed find's opt-in
+check (`X-Treg-Route-Verify`, catalog.md) is one more such child: it gets what the find left, and
+its refusal leaves the find charged and the check unrun. A refusal is a 402
 `route_max_cost` and moves no money for that attempt. Overflow inherits the same field via its
 child snapshot and checks its own estimate; a preceding direct charge reduces the remainder.
 This is a pre-reservation guard, not a rewrite of provider-reported settlement evidence.
@@ -922,7 +1179,8 @@ and `cost_source: "aggregator"` + `served_via` in the ledger `meta`, so `reconci
 accounting for the per-aggregator daily budget, not a balance. That budget is
 `TREG_OVERFLOW_DAILY_BUDGET_USD`: the code default is $20 per aggregator. A deployment may set a
 different value in its private operational configuration. Shadow mode places no hold and charges
-nothing.
+nothing. Skip-direct places no parent hold and leaves `payer_org_id` empty; cancellation of the
+child requires the authenticated caller and releases `{call_ref}:overflow` under that org.
 
 **The relay price is disclosed wherever a price is read.** `/call/` says `X-Treg-Served-Via:
 overflow:<aggregator>` with `X-Treg-Cost-Micro` the child's charge; the MCP `call` result (both

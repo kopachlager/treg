@@ -1,6 +1,7 @@
 """Conservative result evidence for cache admission. Never rewrites provider bytes."""
 from dataclasses import dataclass
 import json
+import logging
 import math
 import re
 from typing import Literal
@@ -20,9 +21,17 @@ STRICT_ENDPOINTS = frozenset({
 class Result:
     state: Literal["found", "empty", "error", "unknown"]
     reason: str
+    # A 2xx that names its own error AND that the adapter judges empty: nothing was found. Kept
+    # beside `state` so cache admission still reads `error`, while the hit verdict reads a miss.
+    empty: bool = False
 
     @property
     def hit(self) -> bool | None:
+        # A 200 whose body names its own error (`errors: [{"error": "page_not_found"}]`) and carries
+        # nothing found is a miss for the hit verdict; one that names an error beside real results
+        # (one failed page of several) stays undecided. The state stays `error` for cache admission.
+        if self.state == "error" and self.empty:
+            return False
         return {"found": True, "empty": False}.get(self.state)
 
 
@@ -42,6 +51,33 @@ def has_result_rules(endpoint_id: str) -> bool:
     return adapter is not None and adapter.verified and bool(adapter.miss.strip())
 
 
+def verdict(endpoint_id: str, status: int, body: bytes) -> str | None:
+    """The contract's verdict word for one answer (`valid`, `catch_all`, `verified`...), or None.
+
+    None when the endpoint's verified adapter records no verdict, the call failed, the body is not
+    JSON, or the answer does not fill the contract's required output. A provider word the adapter
+    does not map is also None, logged so the gap is seen rather than counted as something else.
+    """
+    if not 200 <= status < 300:
+        return None
+    from .store import load
+
+    # Runs inside the call's audit step: whatever goes wrong here costs the word, never the call.
+    try:
+        adapter = load().adapters.get(endpoint_id)
+        if adapter is None or not adapter.verified or not adapter.records_verdict:
+            return None
+        doc = json.loads(body)
+        raw = adapter.verdict_raw(doc) if isinstance(doc, (dict, list)) else None
+        word = adapter.verdict_word(raw)
+    except Exception:  # noqa: BLE001 - an unreadable body or a failing expression is no verdict
+        return None
+    if raw is not None and word is None:
+        logging.getLogger("treg.catalog").warning(
+            "unmapped verdict word %r from %s; add it to the adapter's `verdicts`", raw[:40], endpoint_id)
+    return word
+
+
 def classify(endpoint_id: str, status: int, body: bytes) -> Result:
     if not 200 <= status < 300:
         return Result("error", "http_error")
@@ -52,7 +88,14 @@ def classify(endpoint_id: str, status: int, body: bytes) -> Result:
     except (ValueError, RecursionError):
         return Result("unknown", "invalid_json")
     if isinstance(doc, dict) and (doc.get("error") or doc.get("errors")):
-        return Result("error", "provider_error")
+        empty = False
+        if endpoint_id not in STRICT_ENDPOINTS:
+            from .store import load
+            try:
+                empty = bool(load().adapters[endpoint_id].is_miss(doc))
+            except Exception:  # noqa: BLE001 - a predicate failure is no verdict
+                empty = False
+        return Result("error", "provider_error", empty=empty)
     if endpoint_id not in STRICT_ENDPOINTS:
         from .store import load
 

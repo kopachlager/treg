@@ -50,8 +50,9 @@ nothing here touches `store.search`, its scoring or the evidence rerank.
 
 Both stream the same two NDJSON events - `candidates` as soon as recall is computed, `judged` when
 the judge answers - so the pages animate the wait on the first. The judge abstains rather than
-fails; an abstaining judge falls back to the keyword page (`store.rank_band`, 25 rows, unjudged,
-verdict `keyword`), never to an error. `admit` rate limits per IP and per deployment through
+fails; an unambiguous provider name still opens that provider's tools, while other abstentions
+fall back to the keyword page (`store.rank_band`, 25 rows, unjudged, verdict `keyword`).
+`admit` rate limits per IP and per deployment through
 `ratestore` in a session committed and closed before the judge is called, and the evidence read
 (below) happens after the judge has answered: no request holds a connection while Jev thinks.
 
@@ -81,7 +82,8 @@ none, and the page lists only the vendors the lexical order happened to reach.
   has none. The long-term fix for a member that does another job is its own capability.
 - **uncatalogued endpoint**: no capability; its own unit.
 
-Only the browse surface (`store.browsable`, no routed parents). A first-party endpoint may share its
+Only the browse surface (`store.browsable`, no routed parents, no paused provider: `store.paused`,
+see catalog.md § Paused providers). A first-party endpoint may share its
 capability's id, so the index keeps jobs (`job_pos`) and endpoints (`pos`) apart.
 
 **Channels.** A lexical channel scores each unit with the idf of every query word its card holds as
@@ -122,7 +124,8 @@ at any length, "exa"; or, from four letters, a prefix of exactly one provider's)
 model name. A word several platforms or providers share ("video", "search", "ads", "goog") names
 none of them, and the judged answer reads it. Product names come from endpoint names on the `AI generation` platforms: words two or
 more of those names share and names elsewhere rarely use ("gemini", "seedance", "flux"; not
-"image"), minus the keys of `aliases.yaml` ("tts" is a way of saying a job, not a product), and
+"image"), or, on a platform with a single endpoint, words of its name no other name uses ("jev"),
+minus the keys of `aliases.yaml` ("tts" is a way of saying a job, not a product), and
 adjacent pairs of them ("nano banana"), matched with spaces and hyphens folded away.
 On a shelf only a provider there counts.
 

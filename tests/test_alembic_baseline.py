@@ -69,8 +69,12 @@ async def _insert_org_at_revision(session, **fields) -> int:
     present = {c["name"] for c in await session.run_sync(
         lambda sync: sa_inspect(sync.connection()).get_columns("org"))}
     values = {k: v for k, v in Org(**fields).model_dump().items() if k in present and v is not None}
-    result = await session.execute(insert(Org.__table__).values(**values))
-    return result.inserted_primary_key[0]
+    # A table of exactly those columns: inserting through `Org.__table__` would add the model's
+    # defaults for every column it knows, including ones the old revision does not have yet.
+    from sqlalchemy import column, table
+    org = table("org", *(column(k) for k in values))
+    await session.execute(insert(org).values(**values))
+    return (await session.execute(select(Org.id).where(Org.slug == fields["slug"]))).scalar_one()
 
 
 async def test_managed_key_migration_backfills_human_and_agent_hashes():

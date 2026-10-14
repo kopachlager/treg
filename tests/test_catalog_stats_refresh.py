@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import random
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -18,7 +19,9 @@ from sqlalchemy import select
 from treg.application import catalog_stats
 from treg.domain.catalog import stats
 from treg.infra import catalog_observations
-from treg.infra.catalog_observations import PostgresEndpointObservationReader
+from treg.infra.catalog_observations import (
+    CachedEndpointObservationReader, PostgresEndpointObservationReader,
+)
 from treg.infra.db import session_maker
 from treg.models import CallRecord, EndpointDayStat, EndpointStatCursor
 
@@ -31,11 +34,12 @@ def _now() -> datetime:
 
 
 async def _record(endpoint_id: str | None, status: int, ms: int | None = 100, *, ago: timedelta,
-                  refused_by: str | None = None, hit: bool | None = None, cost: int | None = None) -> int:
+                  refused_by: str | None = None, hit: bool | None = None, cost: int | None = None,
+                  verdict: str | None = None) -> int:
     async with session_maker() as db:
         row = CallRecord(org_id=1, user_email="a@b.c", tool_name=endpoint_id or "plain", method="GET",
                          path="/x", status_code=status, endpoint_id=endpoint_id, duration_ms=ms,
-                         refused_by=refused_by, hit=hit, cost_observed_micro=cost,
+                         refused_by=refused_by, hit=hit, cost_observed_micro=cost, verdict=verdict,
                          created_at=_now() - ago)
         db.add(row)
         await db.commit()
@@ -108,14 +112,74 @@ async def test_rows_inside_the_commit_lag_wait_for_the_next_run(clients):
     assert folded[EP]["samples"] == 7 and folded[EP]["ok_rate"] == round(6 / 7, 4)
 
 
-async def test_async_hits_are_read_after_the_fold_cursor_passes_submission(clients):
+def _async_without_adapter(monkeypatch) -> str:
+    from treg.domain.catalog import store as catalog_store
+
+    endpoint = "test.async.unclassified"
+    catalog = catalog_store.load()
+    monkeypatch.setitem(catalog.by_id, endpoint, {
+        "id": endpoint, "async": {"state": "status"}, "cost": {"type": "per_success"},
+    })
+    assert endpoint not in catalog.adapters
+    return endpoint
+
+
+async def test_async_without_adapter_publishes_complete_folded_evidence(clients, monkeypatch):
+    """A task ticket does not make otherwise immutable HTTP evidence need a live scan.
+
+    Preserve recorded hits, but never manufacture async hits or misses from paid/free calls.
+    """
+    endpoint = _async_without_adapter(monkeypatch)
+    for n in range(20):
+        await _record(endpoint, 200, 100, ago=timedelta(days=3), hit=n < 12, cost=0)
+    for n in range(6):
+        await _record(endpoint, 200, 300, ago=timedelta(days=1), cost=5000 if n % 2 else 0)
+    for status in (500, 405, 422):
+        await _record(endpoint, status, 900, ago=timedelta(days=1))
+    await _record(endpoint, 402, None, ago=timedelta(days=1), refused_by="balance")
+    assert (await catalog_stats.refresh(session_maker, now=_now()))["caught_up"]
+
+    async def no_live_aggregate(*args, **kwargs):
+        raise AssertionError("immutable async observations must come from their day buckets")
+
+    monkeypatch.setattr(stats, "observed", no_live_aggregate)
+    observation = (await PostgresEndpointObservationReader(session_maker).get_many([endpoint]))[endpoint]
+    assert observation == {
+        "samples": 29, "decided": 28, "ok_rate": round(26 / 28, 4),
+        "p50_ms": 100, "p95_ms": 300, "last_ok_days": 1,
+        "hit_rate": 0.6, "hit_samples": 20,
+    }
+
+
+async def test_async_hits_are_read_after_the_fold_cursor_passes_submission(clients, monkeypatch):
+    """A mixed read folds immutable tasks but still sees terminal corrections on adapter tasks.
+
+    Losing verification later cannot erase already-recorded terminal evidence.
+    """
+    from treg.domain.catalog import store as catalog_store
+
     endpoint = "wiza.people.email.find"
+    folded_endpoint = _async_without_adapter(monkeypatch)
+    for _ in range(6):
+        await _record(folded_endpoint, 200, 100, ago=timedelta(hours=1), cost=0)
     row_ids = [await _record(endpoint, 200, 100, ago=timedelta(hours=1), cost=0)
                for _ in range(20)]
     assert (await catalog_stats.refresh(session_maker, now=_now()))["caught_up"]
+    live_calls = []
+    original_observed = stats.observed
+
+    async def only_mutable_live(db, endpoint_ids, **kwargs):
+        live_calls.append(list(endpoint_ids))
+        assert list(endpoint_ids) == [endpoint]
+        assert kwargs["per_success"] == set()
+        return await original_observed(db, endpoint_ids, **kwargs)
+
+    monkeypatch.setattr(stats, "observed", only_mutable_live)
     reader = PostgresEndpointObservationReader(session_maker)
-    pending = (await reader.get_many([endpoint]))[endpoint]
-    assert pending["hit_samples"] == 0
+    pending = await reader.get_many([folded_endpoint, endpoint])
+    assert pending[endpoint]["hit_samples"] == 0
+    assert pending[folded_endpoint]["samples"] == 6
+    assert pending[folded_endpoint]["hit_samples"] == 0
 
     async with session_maker() as db:
         rows = (await db.execute(select(CallRecord).where(CallRecord.id.in_(row_ids)))).scalars().all()
@@ -123,8 +187,38 @@ async def test_async_hits_are_read_after_the_fold_cursor_passes_submission(clien
             row.hit = n < 12
             db.add(row)
         await db.commit()
-    final = (await reader.get_many([endpoint]))[endpoint]
-    assert final["hit_samples"] == 20 and final["hit_rate"] == 0.6
+    catalog = catalog_store.load()
+    monkeypatch.setitem(catalog.adapters, endpoint,
+                        replace(catalog.adapters[endpoint], verified=False, miss=""))
+    final = await reader.get_many([folded_endpoint, endpoint])
+    assert final[endpoint]["hit_samples"] == 20 and final[endpoint]["hit_rate"] == 0.6
+    assert final[folded_endpoint] == pending[folded_endpoint]
+    assert live_calls == [[endpoint], [endpoint]]
+
+
+async def test_cold_async_cache_completes_from_existing_day_buckets(clients, monkeypatch):
+    endpoint = _async_without_adapter(monkeypatch)
+    for _ in range(6):
+        await _record(endpoint, 200, 100, ago=timedelta(hours=1), cost=0)
+    assert (await catalog_stats.refresh(session_maker, now=_now()))["caught_up"]
+
+    async def no_live_aggregate(*args, **kwargs):
+        raise AssertionError("a cold cache must not re-aggregate immutable async calls")
+
+    monkeypatch.setattr(stats, "observed", no_live_aggregate)
+    reader = CachedEndpointObservationReader(PostgresEndpointObservationReader(session_maker))
+    try:
+        assert await reader.get_many([endpoint]) == {}
+        assert reader.pending([endpoint])
+        await reader.wait_for_idle()
+        assert reader.counts.refresh_failure == 0
+        observation = (await reader.get_many([endpoint]))[endpoint]
+        assert observation["samples"] == 6 and observation["ok_rate"] == 1.0
+        assert observation["p50_ms"] == observation["p95_ms"] == 100
+        assert observation["hit_samples"] == 0 and observation["hit_rate"] is None
+        assert not reader.pending([endpoint])
+    finally:
+        await reader.aclose()
 
 
 async def test_async_per_success_uses_terminal_hits_including_failed_attempts(clients):
@@ -279,9 +373,134 @@ def test_a_busy_day_outweighs_a_quiet_one_in_the_merged_percentile():
 
 
 def test_merging_days_keeps_the_newest_success_and_every_count():
-    a = stats.Tally(n=3, ok=2, bad=1, last_ok=datetime(2026, 9, 1), hits=1, hit_decided=2, latency_seen=2, latencies=[10, 20])
-    b = stats.Tally(n=4, ok=4, bad=0, last_ok=datetime(2026, 9, 3), paid_hits=2, free_misses=1, latency_seen=4, latencies=[30, 40, 50, 60])
+    a = stats.Tally(n=3, ok=2, bad=1, last_ok=datetime(2026, 9, 1), hits=1, hit_decided=2, latency_seen=2, latencies=[10, 20],
+                    verdicts={"valid": 2, "unknown": 1})
+    b = stats.Tally(n=4, ok=4, bad=0, last_ok=datetime(2026, 9, 3), paid_hits=2, free_misses=1, latency_seen=4, latencies=[30, 40, 50, 60],
+                    verdicts={"valid": 1, "catch_all": 3})
     m = stats.merged([(EP, a), (EP, b)])[EP]
     assert (m.n, m.ok, m.bad, m.last_ok) == (7, 6, 1, datetime(2026, 9, 3))
     assert (m.hits, m.hit_decided, m.paid_hits, m.free_misses) == (1, 2, 2, 1)
+    assert m.verdicts == {"valid": 3, "unknown": 1, "catch_all": 3}
     assert m.latency_seen == 6 and sorted(m.latencies) == [10, 20, 30, 40, 50, 60]
+
+
+async def test_observed_from_drops_the_days_before_a_replaced_service(clients, monkeypatch):
+    """An entry's `observed_from` keeps the folded days before it out of the published figures:
+    the provider replaced the service, and those calls measured the old one."""
+    from treg.domain.catalog import store as catalog_store
+    for _ in range(6):
+        await _record(EP, 502, 100, ago=timedelta(days=3))
+    for _ in range(6):
+        await _record(EP, 200, 100, ago=timedelta(minutes=5))
+    await catalog_stats.refresh(session_maker, now=_now())
+    reader = PostgresEndpointObservationReader(session_maker)
+    assert (await reader.get_many([EP]))[EP]["ok_rate"] == 0.5
+    entry = catalog_store.load().by_id[EP]
+    monkeypatch.setitem(entry, "observed_from", (_now() - timedelta(days=1)).strftime("%Y-%m-%d"))
+    after = (await reader.get_many([EP]))[EP]
+    assert after["samples"] == 6 and after["ok_rate"] == 1.0
+
+
+VERIFY = "millionverifier.people.email.verify"
+
+
+async def _bucket(endpoint_id: str) -> EndpointDayStat:
+    async with session_maker() as db:
+        return (await db.execute(select(EndpointDayStat).where(
+            EndpointDayStat.endpoint_id == endpoint_id))).scalar_one()
+
+
+async def test_the_fold_counts_verdict_words_per_day(clients):
+    """Each word is counted under the same refusal rule as every other count. `unknown` is its
+    own word, never folded into a miss, and a call without a word adds none."""
+    old = timedelta(days=2)
+    for word, count in (("valid", 12), ("invalid", 5), ("catch_all", 3), ("unknown", 2)):
+        for _ in range(count):
+            await _record(VERIFY, 200, 100, ago=old, hit=word != "unknown", verdict=word)
+    await _record(VERIFY, 200, 100, ago=old, hit=True)                        # no word: not counted
+    await _record(VERIFY, 402, None, ago=old, refused_by="balance", verdict="valid")  # a refusal is no evidence
+    assert (await catalog_stats.refresh(session_maker, now=_now()))["caught_up"]
+    assert (await _bucket(VERIFY)).verdicts == {"valid": 12, "invalid": 5, "catch_all": 3, "unknown": 2}
+
+
+async def test_verdict_counts_are_not_published_yet(clients):
+    """Stored, not shown: the catalog observation an agent reads carries no verdict counts on
+    either read path until the word mappings are proven."""
+    for _ in range(stats.MIN_HIT_SAMPLES + 5):
+        await _record(VERIFY, 200, 100, ago=timedelta(days=1), hit=True, verdict="valid")
+    live = await _live([VERIFY])
+    assert (await catalog_stats.refresh(session_maker, now=_now()))["caught_up"]
+    folded = await PostgresEndpointObservationReader(session_maker).get_many([VERIFY])
+    assert "verdicts" not in live[VERIFY] and "verdicts" not in folded[VERIFY]
+    assert folded[VERIFY] == live[VERIFY]
+    assert (await _bucket(VERIFY)).verdicts == {"valid": stats.MIN_HIT_SAMPLES + 5}
+
+
+async def test_a_bucket_folded_before_verdicts_existed_reads_as_empty(clients):
+    """`verdicts` is NULL on a bucket the worker wrote before the column; the next fold into it
+    starts that day's words from the rows it reads."""
+    day = (_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    async with session_maker() as db:
+        db.add(EndpointDayStat(endpoint_id=VERIFY, day=day, n=3, ok=3, bad=0, verdicts=None))
+        await db.commit()
+    await _record(VERIFY, 200, 100, ago=timedelta(days=1), hit=True, verdict="valid")
+    assert (await catalog_stats.refresh(session_maker, now=_now()))["caught_up"]
+    async with session_maker() as db:
+        bucket = await db.get(EndpointDayStat, (VERIFY, day))
+    assert bucket.n == 4 and bucket.verdicts == {"valid": 1}
+
+
+async def test_an_empty_answer_counts_against_a_strict_capability_on_both_paths(clients):
+    """`empty_is_failure` (scrape, search, Google organic): a 2xx the adapter judged empty is the
+    provider failing the job, so a provider that answers 200 to everything cannot keep a success
+    rate it did not earn. The fold and the live query agree; other capabilities are unchanged."""
+    from treg.domain.catalog import store as catalog_store
+    strict, plain = "tinyfish.web.fetch", EP
+    assert catalog_store.empty_is_failure(strict) and not catalog_store.empty_is_failure(plain)
+    old = timedelta(days=2)
+    for _ in range(3):
+        await _record(strict, 200, 100, ago=old, hit=True)
+    for _ in range(2):
+        await _record(strict, 200, 100, ago=old, hit=False)     # empty page under a 200
+    await _record(strict, 200, 100, ago=old, hit=None)          # no verdict: still a success
+    for _ in range(6):
+        await _record(plain, 200, 100, ago=old, hit=False)      # a plain miss is not a failure here
+    assert (await catalog_stats.refresh(session_maker, now=_now()))["caught_up"]
+
+    live = await _live([strict, plain])
+    folded = await PostgresEndpointObservationReader(session_maker).get_many([strict, plain])
+    assert folded[strict]["ok_rate"] == live[strict]["ok_rate"] == round(4 / 6, 4)
+    assert folded[strict]["p50_ms"] == live[strict]["p50_ms"]
+    assert folded[plain]["ok_rate"] == live[plain]["ok_rate"] == 1.0
+
+
+def test_an_error_named_inside_a_200_is_a_miss_for_the_hit_verdict():
+    from treg.domain.catalog.results import Result, classify
+    assert Result("error", "provider_error", empty=True).hit is False   # an error and nothing found
+    assert Result("error", "provider_error").hit is None       # an error beside real results
+    page = b'{"results":[{"url":"https://x.test/a","text":"' + b"word " * 50 + b'"}],"errors":[{"url":"https://x.test/b","error":"page_not_found"}]}'
+    gone = b'{"results":[],"errors":[{"url":"https://x.test/b","error":"page_not_found","status":404}]}'
+    assert classify("tinyfish.web.fetch", 200, gone).hit is False
+    assert classify("tinyfish.web.fetch", 200, page).hit is None
+    assert Result("error", "http_error").hit is None           # a failed call has no verdict
+    assert Result("found", "adapter_hit").hit is True and Result("empty", "adapter_miss").hit is False
+
+
+def test_every_strict_capability_tool_on_treg_key_has_a_verified_empty_rule():
+    """`empty_is_failure` judges an answer only through the endpoint's verified adapter `miss`. A
+    scrape, search or Google organic tool served on treg's key without one would keep counting its
+    empty 200s as successes while every covered provider counts them as failures: the measured
+    success rate, and the ranking it drives, would favour the provider nobody judged. Tools that
+    treg's key cannot call are judged for nobody (an own key's body is not read), so they are exempt."""
+    from treg.domain.catalog import store as catalog_store
+    cat = catalog_store.load()
+    unjudged = []
+    for ep in cat.endpoints:
+        if ep.get("kind") == "routed" or not catalog_store.empty_is_failure(ep["id"]):
+            continue
+        if not cat.platform_eligible(ep):
+            continue
+        adapter = cat.adapters.get(ep["id"])
+        if adapter is None or not adapter.verified or not adapter.miss.strip():
+            unjudged.append(ep["id"])
+    assert unjudged == [], f"add a verified adapter (route: false if it must not route) for {unjudged}"

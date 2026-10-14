@@ -76,7 +76,7 @@ async def test_platform_detail_groups_the_same_job_across_providers(clients: Asy
 
     ep = next(e for e in profile["endpoints"] if e["provider"] == "tikhub")
     assert set(ep) == {"id", "provider", "provider_display", "name", "summary", "method", "path",
-                       "scope", "tier", "kind", "domain", "call_template", "cost", "verified", "docs_url",
+                       "scope", "tier", "kind", "domain", "call_template", "cost", "verified", "added", "docs_url",
                        "has_example", "input", "platform_eligible", "platform_blocked",
                        "test_request", "miss", "status", "status_note", "superseded_by", "async"}
     assert ep["kind"] == "data", "an endpoint with no explicit kind is data (the browse surface)"
@@ -201,6 +201,24 @@ def test_a_compared_job_carries_its_short_title_and_keeps_its_description(tmp_pa
     [row] = [r for s in cs.domain_rows(pairs, cat.capabilities, cat.capability_titles) for r in s["rows"]]
     assert row["title"] == "Find a person's work email"
     assert row["description"] == long
+
+
+def test_short_job_title_is_searchable_without_changing_the_full_description(tmp_path):
+    (tmp_path / "capabilities.yaml").write_text(
+        'platforms: {web: Web}\ncapabilities: {web.extract: "Read content from a URL"}\n'
+        'capability_titles: {web.extract: "Archive lookup"}\n')
+    for provider in ("one", "two"):
+        (tmp_path / f"{provider}.yaml").write_text(
+            f"provider: {provider}\nendpoints:\n  - id: {provider}.read\n"
+            "    platform: web\n    capability: web.extract\n    method: GET\n"
+            "    path: /read\n    summary: Read a URL\n")
+    cat = cs.load(directory=tmp_path)
+    matches, total = cs.search("archive", cat, platform="web")
+    assert total == 2
+    assert {ep["id"] for ep, _ in matches} == {"one.read", "two.read"}
+    from treg.domain.catalog import find_recall
+    candidates = find_recall.recall("archive", find_recall.index(cat), cat.aliases, platform="web")
+    assert any(candidate.unit.id == "web.extract" for candidate in candidates)
 
 
 def test_a_title_for_no_capability_fails_the_load(tmp_path):
@@ -330,9 +348,10 @@ async def test_search_finds_the_job_across_providers_best_first(clients: AsyncCl
     rows = body["results"]
     assert body["count"] == len(rows) <= body["total"]
 
-    top = [e["id"] for e in rows[:5]]
+    top = [e["id"] for e in rows[:6]]
     assert top[0] == "treg.tiktok.video.comments", "the routed endpoint for the job comes first"
     assert set(top[1:]) == {
+        "crawl4ai.tiktok.video.comments",
         "anyapi.tiktok.video.comments",
         "justoneapi.tiktok.video.comments",
         "tikhub.tiktok.video.comments",
