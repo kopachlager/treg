@@ -51,6 +51,8 @@ _KNOWN: dict[str, tuple[str, str, str]] = {
     "search1api": ("credits", "auto_recharge", "api"),
     "octen": ("cash", "manual", "manual"),
     "linkup": ("cash", "manual", "api"),
+    # The balance route needs an Account API OAuth token, not the API key treg holds.
+    "parallel": ("cash", "manual", "manual"),
     "you": ("cash", "auto_recharge", "api"),
     "valyu": ("credits", "subscription", "manual"),
     # The API supplies the exact credit balance; vendor auto recharge was manually enabled and
@@ -160,6 +162,9 @@ _RATE_LIMITS: dict[str, dict] = {
     # endpoint-specific Extract URL limits remain enforced by Octen.
     "octen": {"limit": 5, "window_s": 1, "source": "policy"},
     "linkup": {"limit": 10, "window_s": 1, "source": "docs"},
+    # Search, Extract and Entity Search each allow 600 requests a minute. Smoothing is
+    # provider-wide, so the shared key stays at one product's allowance.
+    "parallel": {"limit": 600, "window_s": 60, "source": "docs"},
     # Finance Research is 5/s; the other You.com APIs are 10/s. Smoothing is provider-wide.
     "you": {"limit": 5, "window_s": 1, "source": "docs"},
     # GET /account reports 50 queries/s for the current shared account. Pace the platform key to
@@ -195,6 +200,25 @@ _RATE_LIMITS: dict[str, dict] = {
     # The shared account's upgraded level: 100 RPS, honored only on the enterprise node (base_url).
     "tikhub": {"limit": 100, "window_s": 1, "source": "policy"},
     "getleadsio": {"limit": 100, "window_s": 60, "source": "docs"},
+}
+# An endpoint whose upstream allowance differs from its provider's has its own bucket here. It
+# replaces the provider entry for that endpoint and does not draw from the provider's bucket.
+_ENDPOINT_RATE_LIMITS: dict[str, dict] = {
+    # Email Verifier publishes no limit; its 429s carry x-ratelimit-limit 20 per minute, far below
+    # the documented 1,000/min for other APIs. A provider-wide 20/min would slow every other route.
+    "contactout.people.email.verify": {"limit": 20, "window_s": 60, "source": "headers"},
+}
+
+# Calls in progress a provider allows on treg's own key (domain/capacity/fair_share.py shares them
+# between teams; BYOK calls bypass it). Only providers that publish or report such a cap belong here.
+_CONCURRENCY: dict[str, int] = {
+    # The key reports its concurrency room in every answer (usage.remaining_before.concurrent).
+    "crawl4ai": 500,
+    "hlrlookup": 210,
+    # The key status API reports its configured concurrency limit.
+    "litescrape": 25,
+    # treg's own conservative setting for the shared account (catalog row `limits`).
+    "fishaudio": 5,
 }
 
 

@@ -17,6 +17,8 @@ sources:
   - src/treg/web/selfhost.sh
   - src/treg/config.py
   - src/treg/infra/db.py
+  - src/treg/infra/money_admission.py
+  - scripts/bench_money_admission.py
   - src/treg/email.py
   - src/treg/audit.py
   - scripts/dev-local.sh
@@ -99,7 +101,11 @@ its own revision: its lock permits ordinary reads and writes, although it confli
 maintenance. Such a revision restores the caller's timeouts and handles interruption: invalid builds
 must be rebuilt, and a partially completed removal must be retryable. Revision `0061` removes only
 ordinary indexes with verified unique-constraint replacements; its rollback recreates those indexes
-concurrently and requires enough disk space for them.
+concurrently and requires enough disk space for them. Revision `0072` builds
+`ix_callrecord_call_ref` where a database stamped at the baseline never got it; a build on a large
+table outlasts any fixed statement timeout, so it lifts `statement_timeout` for that one statement
+(the lock timeout stays bounded) and the deploy's own pre-deploy limit bounds it. Deploy such a
+revision in a quiet window: the build reads the whole table while traffic keeps writing.
 
 Hot-table ALTERs stay cheap to retry when they sit in their own revision, add only nullable columns
 without defaults (metadata-only in PostgreSQL) and leave backfills and `NOT NULL` to later steps.
@@ -135,6 +141,14 @@ through. Live values and production sizing belong in the private operator runboo
 headroom. Resize from measurements, one pool at a time. A larger pool does not repair a slow scan,
 lock queue, disk-bound database or missing index.
 
+Web roles and worker commands also run local money-transaction diagnostics independently of the
+PostHog key. Verify fresh `money_trace_gauge` records for each deployed build and process, including
+tracking counts, sample age and drop counters. `money_txn_slow` and `money_txn_end` correlate backend
+PIDs with application transaction IDs and stages; join within their timestamp intervals because
+connections are reused. Read the coverage and loss limitations in
+[data-model](../architecture/data-model.md#product-analytics-writer-analyticspy) before interpreting
+missing records. Deployment requires no schema migration or new database privileges.
+
 All pools use `pool_pre_ping=True`, `pool_recycle=300` and `pool_timeout=5`. A request that gets no
 slot in time receives `503 {"treg_saturated": true}` with `Retry-After: 2` through
 `bootstrap_handlers._pool_saturated`. A `/call/` holds no connection during the upstream round trip.
@@ -168,6 +182,14 @@ These connection settings guard accidental writes; they are not an authorization
 be disabled by deliberate SQL. Use a physical replica/read-only database role or filesystem access
 controls as appropriate. Connection/query failures propagate without primary fallback.
 
+`/admin/errors` uses this datasource for evidence and org names. Authorization stays on the admin
+primary pool and releases its connection before the report begins. With no read URL configured,
+`get_admin_read_session` preserves the original admin pool rather than using the general reader's
+API-pool fallback. Configured reader failures never retry on the primary.
+Before enabling a hosted cutover, verify the running process has the intended read URL, the target
+is a readable replica with the required table grants, and replication lag is acceptable. Configuring
+a URL does not migrate any other report. Removing it returns this report to the admin primary pool.
+
 `pool_snapshot()` includes a separate `read` entry for a configured PostgreSQL datasource; SQLite
 engines are omitted as for the primary. `connection_budget()` describes only the primary pools;
 budget the read pool against its target database, including process count and deployment overlap.
@@ -175,8 +197,8 @@ If both URLs target the same server, add both budgets against that server's limi
 `dispose_engine()` also disposes the read engine. Schema upgrades, startup verification and test
 schema resets continue to target the primary.
 
-This datasource is opt-in infrastructure: no application query or worker currently uses it.
-Adopting callers must tolerate replica lag and keep writes, cursor advancement and concurrency
+This datasource is opt-in infrastructure; `/admin/errors` is its first report consumer.
+Further callers must tolerate replica lag and keep writes, cursor advancement and concurrency
 control on the primary. Operators must provision and synchronize a compatible schema and data;
 setting a URL does not establish replication, translate dialect-specific queries, or migrate any
 Cron job's workload. Configure it in a private local `.env` or the hosting service's environment;
@@ -198,6 +220,11 @@ Cron job's workload. Configure it in a private local `.env` or the hosting servi
   credentials make that provider unconfigured instead of failing halfway through consent.
 - `oauth_review_pending` is a comma-separated set of provider-registry review keys. Its hosted value
   is operational state and is maintained privately.
+- `paused_providers` is a comma-separated set of provider service ids this deployment cannot serve
+  right now, for example because its own app lost upstream access. Empty (the default) pauses
+  nothing. `paused_provider_messages` is an optional JSON object `{service: message}`; malformed
+  JSON fails at boot. Removing an id restores the provider with no reconnect. Its hosted value is
+  operational state and is maintained privately. See `interface/api.md` § `503 provider_paused`.
 - `promo_grant_micro` controls the once-per-verified-user signup grant. Zero pauses new automatic
   grants without changing existing balances.
 - `blocked_email_domains` is the complete comma-separated blocklist. Empty blocks no domains. It is
@@ -220,6 +247,73 @@ subsystems. Credentials must stay in the deployment secret store. `TREG_PLATFORM
 shared-serving allow-list. Most providers also require a configured platform key. A live-verified
 free endpoint declared `platform_auth: anonymous` needs only the allow-list because treg injects no
 provider credential.
+
+## Optional money admission
+
+Root Web requests have a separate, default-disabled [Org concurrency guard](../architecture/org-concurrency.md).
+Its per-Org map and exemptions are environment configuration; enabling requires an explicit Redis
+outage policy and shared Redis. See that fragment for placeholder configuration, lease-loss limits,
+and rollback by disabling. It does not change the money admission or financial cleanup below.
+
+`TREG_MONEY_ADMISSION_ENABLED` defaults to `false`. Enabling it requires a shared Redis-compatible
+store at `TREG_KV_URL`; all participating web and money-worker processes must use the same store
+and rollout settings. No database migration or additional database privileges are required.
+
+- `TREG_MONEY_ADMISSION_ORG_IDS` is a JSON array of positive Org IDs. A non-empty array enables
+  admission only for those orgs; `[]` covers all orgs when the feature is enabled.
+- `TREG_MONEY_ADMISSION_WAIT_S` accepts values greater than 0 through 120 seconds, defaults to
+  5 seconds, and bounds the complete local/Redis acquisition attempt. Local-lock waiting uses
+  the same budget as Redis waiting. Cleanup is separately bounded by the KV operations. Exhausting this
+  budget falls back to the existing database path; it does not reject or discard settlement.
+  `reserve` and `release` use that same wait and key-value fallback. A missing or non-positive
+  org on those operations refuses before checkout, and that refusal is not an HTTP 429.
+- `TREG_MONEY_ADMISSION_LEASE_S` defaults to 15 seconds. The owner renews while acquiring or using
+  its leases and deletes only leases with its token. Expiry, lost renewal or a Redis outage can
+  admit overlapping database transactions, so existing database locks remain authoritative.
+  The lease starts on acquisition and renews at TTL/3; it need not exceed the pre-acquisition wait.
+
+Allowing a 90–120 second admission wait does not guarantee an end-to-end request can wait that
+long. It changes no default or running configuration. Budget for earlier request stages, every
+admission scope (reserve and settle can each wait), upstream work, database execution, retries,
+and cancellation/lease cleanup. Longer queues retain more pending requests and can increase
+latency or client retries without increasing a hot org's transaction throughput.
+
+Before opting into a longer wait, review these independent limits:
+
+| Boundary | Existing behavior and compatibility |
+|---|---|
+| Redis commands and renewal | `infra.kv` keeps 1-second socket timeouts, 1.5-second lease attempts, and a 2.5-second per-key renewal/release retry budget. Renewal is also bounded by the earliest confirmed lease expiry. Optional counters/health probes retain their dedicated 200 ms deadline. None scales with the queue wait. |
+| Plain call / upstream | `bootstrap._lifespan` configures `call_timeout_s` (default 180 seconds) on the upstream HTTP client. This is an HTTP I/O timeout, not a total request deadline or a budget for admission plus execution. |
+| Hold age | `domain.money.hold_ttl_s` remains `call_timeout_s + hold_grace_s` (defaults: 180 + 60 = 240 seconds). Pre-reserve admission precedes hold creation, but later admission consumes hold age. A slow upstream plus 90–120 seconds of settlement waiting can exceed the stale-hold cutoff and race a reaper; pending async-task holds are excluded. Review hold lifetime before enabling longer waits. |
+| CLI / local proxy | `cli._client` has a 190-second read timeout; `localproxy.treg_client` defaults to 120 seconds. A full 120-second queue leaves no local-proxy execution headroom; even the CLI can time out across reserve, upstream, and settlement waits. |
+| MCP | `mcp._api` declares a 120-second HTTPX timeout, but its in-process `ASGITransport` does not enforce a network read deadline. This is not an end-to-end guarantee: the external MCP client and hosting path have independent limits. |
+| Async settlement worker | `application.asynctasks.settle_due` has a 30-second processing deadline that starts before the claim and provider poll, including admission and settlement; its separate task-claim lease is 60 seconds. It cannot spend 90–120 seconds in admission within that deadline. Expanding it would require coordinating claim ownership and execution headroom. |
+| Hub / other bounded callers | Hub recipe wall deadlines and per-call script limits include earlier execution; browser onboarding aborts after 60 seconds, and Arena applies its own run/attempt deadlines. They can cancel before the admission budget expires. |
+| Rate limiter | `infra.upstream.limiter.DEFAULT_MAX_WAIT_MS` remains 2,000 ms, independent of money admission. |
+| Render / edge / external clients | Their effective request, idle, and cancellation limits are outside this setting. Verify the actual hosting path and caller budget with execution headroom before rollout; accepting 120 in Settings does not certify a 120-second request through them. |
+
+Deploy compatible code first with admission disabled to collect the same eligible-operation
+baseline, then opt in a small Org set. Compare `money_admission_gauge` wait and end-to-end durations,
+fallback/lease-loss counters, and the existing pool, money-operation and database-failure signals
+under comparable load before expanding. Whole-session serialization can reduce hot-org throughput
+even when it improves connection occupancy, so reduced lock-wait time alone is not rollout
+acceptance. Defaults are acquisition bounds, not workload sizing recommendations. Disable the
+feature to restore the original database admission path; mixed
+settings or old writers weaken isolation but do not remove accounting's database protection.
+There is no global money concurrency cap, and unrelated orgs can still collectively fill a pool.
+See [money](../architecture/money.md#optional-admission-before-the-settlement-session) for exact
+operation coverage and [data-model](../architecture/data-model.md#product-analytics-writer-analyticspy)
+for aggregate boundaries and interpretation.
+
+`tests/test_money_admission_postgres.py` uses real disposable loopback PostgreSQL and Redis via
+`TREG_TEST_DB_URL` and `TREG_TEST_KV_URL`; without these it skips instead of contacting a service.
+The PostgreSQL CI job supplies both services. `scripts/bench_money_admission.py` compares disabled
+and enabled synthetic settlement workloads using the same variables, with database names required
+to start with `treg_admission_test`. It resets that disposable schema. Its timings are local
+synthetic evidence, not a production replay or a guarantee of deployed throughput. Benchmark
+clients use separate Redis connections and local mutex maps within one event loop; this exercises
+Redis contention without a shared local mutex hiding it, but is not an operating-system
+multi-process load or failure test.
 
 ## Safe local mode
 
@@ -268,6 +362,18 @@ tmux runs; add a flag to that list to pass another one through. Keys never go th
 they go in `scripts/.dev-home/dev-keys.env`, which the server sources. The script's own three env vars
 (`TREG_EMAIL_DEV_MODE`, `TREG_CONNECT_DEMO_ENABLED`, `TREG_DATABASE_URL`) are appended last so they
 always win over anything passed through.
+
+Per-IP limits need a client address the client cannot write. Behind Cloudflare set
+`TREG_CLIENT_IP_HEADER=cf-connecting-ip`; behind other proxies set `TREG_TRUSTED_PROXY_HOPS` to the
+number of proxies that append to `X-Forwarded-For` (default 1; 0 when clients connect directly). Each
+process logs `event=client_ip_sources` once with the address headers its proxies deliver (names
+and counts only), and `event=client_ip_header_missing` when the configured header does not arrive.
+See [multi-tenancy](../architecture/multi-tenancy.md), "Client address".
+
+A deployment that installs a policy extension into the server environment (an extra `pip install`
+after the build) should set `TREG_REQUIRED_EXTENSIONS` to its entry-point name, so a build that
+lost it fails to start instead of serving without it. See
+[policy extensions](../architecture/policy-extensions.md).
 
 [`deploy/render.example.yaml`](../../../deploy/render.example.yaml) is a generic self-hosting example.
 It creates one web service and one PostgreSQL database, builds with
@@ -373,6 +479,11 @@ without importing the heavy database stack into the light `treg` CLI.
   (`--max-rows`, default 500,000, bounds one pass; schedule it every few minutes). The catalog keeps
   computing observations live until this command has caught up once, so it can be scheduled after
   the application deploys, and a self-hosted registry that never schedules it loses nothing.
+- `treg-worker spend rollup` folds new ledger settle entries into per-key, per-tool, per-day spend
+  (`--max-rows`, default 50,000, bounds one pass; schedule it every few minutes, after the web
+  service runs a build with revision 0070). It reads the primary database in small batches, and
+  its first run backfills 31 days over as many runs as `--max-rows` needs. The Team page's "Spent"
+  column and the Usage page's spend chart say spend history is being prepared until it has caught up once.
 - `treg-worker jev xboost` runs the `/jev` launch-radar demo once a day: it calls treg's own `/call/` API
   with `TREG_JEV_TREG_TOKEN` (a member token of the demo team, so the spend is an ordinary bill) and jev
   through the Vercel AI Gateway (`TREG_AI_GATEWAY_API_KEY`), and stores the run under Ephemeral for the page.

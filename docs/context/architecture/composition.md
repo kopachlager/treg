@@ -5,6 +5,9 @@ sources:
   - src/treg/bootstrap.py
   - src/treg/bootstrap_handlers.py
   - src/treg/bootstrap_http.py
+  - src/treg/worker.py
+  - src/treg/infra/money_trace_runner.py
+  - src/treg/infra/money_admission_reporting.py
   - src/treg/call_surface.py
   - src/treg/application/connect.py
   - src/treg/domain/identity/mcp_oauth.py
@@ -40,6 +43,8 @@ The `/agent-setup.js` browser asset (compiled from the Dashboard source for Aren
 `bootstrap.create_app(role)` is the FastAPI composition root. `api.py` hosts the ordered route table,
 attaches concern routers at compatibility-sensitive registration points, and calls the factory once at
 EOF so the deployed `treg.api:app` import path remains the default `all` role.
+Its last step loads installed policy extensions (`policy.load_extensions`, see
+[policy extensions](policy-extensions.md)), so an extension's `install` sees the finished app.
 
 The factory owns concrete assembly: the three core pure-ASGI middleware registrations, the optional
 V2 path normalizer, five exception handlers, static mounts, optional MCP mounts and lifespans,
@@ -76,6 +81,24 @@ lifespan emits `analytics.capture_service_started(role)`, one `service_started` 
 carrying the `build` and `archive_config` fingerprints every server event has (see
 [data-model](data-model.md#product-analytics-writer-analyticspy)).
 
+Every role also owns an `infra.money_trace_runner` lifespan, independent of analytics enablement.
+It samples in-process money transactions and event-loop wakeup delay, and sends bounded diagnostic
+records to a dedicated log thread. Shutdown stops it after money-producing background work drains
+and before analytics drains. The worker command dispatcher uses the same lifecycle for every
+command, including asynchronous settlement; its final local summary has a bounded shutdown wait.
+The same runner drains fixed-cardinality lease command timings once per minute and at worker exit,
+to the existing local log sink and analytics queue; it adds no lease-probe task or connection.
+The [data-model](data-model.md#product-analytics-writer-analyticspy) fragment defines the trace's
+coverage, privacy and loss counters.
+
+The existing web money-timing timer also emits `money_admission_gauge` locally and to analytics;
+it adds no background sampler or per-request transport. `worker._run_command` emits the final
+admission window even when its command fails, then attempts at most one second of analytics draining
+after the trace runner has queued its final lease/trace summaries. It closes the shared KV client
+before leaving the trace lifecycle.
+Short-worker delivery remains best effort, so use its local exit summary to distinguish missing
+network delivery from absent work. The final trace summary is emitted separately by its lifecycle.
+
 `bootstrap_handlers.py` owns the app-wide pool-saturation and HTTP-exception adapters.
 `call_surface.split_call_path`
 classifies `/call/`, `/catalog/call/` and `/table/` so those adapters share the same call-id, audit
@@ -89,8 +112,8 @@ idempotency-label release. After caller identity exists, the pool adapter report
 population. Both also send the infrastructure exception to `analytics.capture_fault` before returning
 the typed 503; normal HTTP refusals remain responses, not server faults.
 
-`bootstrap_http.py` owns the app-wide middleware implementations. The middleware stack is
-`_BodyDecodeMiddleware` -> `_SecurityHeadersMiddleware` ->
+`bootstrap_http.py` owns the app-wide HTTP middleware implementations. The middleware stack is
+`org_traffic.RequestLogMiddleware` -> `_BodyDecodeMiddleware` -> `_SecurityHeadersMiddleware` ->
 `_LegacyHostRedirectMiddleware` -> routes/mounts. All three are pure ASGI. The security wrapper adds
 headers at `http.response.start` with case-insensitive setdefault semantics, and the redirect wrapper
 either sends the same 301/302 response as before or calls its child directly. On a local dev server
@@ -100,6 +123,9 @@ rests on) `_DevTitleMiddleware` wraps the stack and prefixes every HTML page's `
 `BaseHTTPMiddleware.call_next()` out of this stack matters for streaming and disconnects: an MCP
 client may close while its stateless transport terminates without sending a response, which is a
 normal end to an already-dead connection rather than a server 500.
+The outer traffic observer emits sanitized [Org request/traffic logs](org-traffic.md). The
+all/dataplane lifespans share one process-local 60-second reporting timer, cancelled when the last
+owner exits; this is not an additional asyncio worker task and does not use analytics or a database.
 
 Pure ASGI does not make a genuine missing-response defect silent. Uvicorn's
 `RequestResponseCycle.run_asgi` checks an app that returns while the connection is still live, logs

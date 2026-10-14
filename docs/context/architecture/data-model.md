@@ -46,13 +46,22 @@ sources:
   - src/treg/domain/provider_resources.py
   - src/treg/routers/provider_resources.py
   - src/treg/alembic/versions/0033_signup_promo_eligibility.py
+  - src/treg/alembic/versions/0071_signup_promo_claim.py
   - src/treg/alembic/versions/0041_searchlog.py
   - src/treg/alembic/versions/0055_find_v2_log.py
   - src/treg/alembic/versions/0056_searchlog_verdict.py
   - src/treg/alembic/versions/0065_call_verdict.py
   - src/treg/alembic/versions/0066_endpointdaystat_verdicts.py
+  - src/treg/alembic/versions/0070_api_key_spend_rollup.py
+  - src/treg/alembic/versions/0072_callrecord_call_ref_index.py
   - src/treg/timeutil.py
   - src/treg/infra/db.py
+  - src/treg/infra/money_timing.py
+  - src/treg/infra/money_admission.py
+  - src/treg/infra/kv.py
+  - src/treg/infra/money_admission_reporting.py
+  - src/treg/infra/money_trace.py
+  - src/treg/infra/money_trace_runner.py
   - src/treg/domain/referrals.py
   - src/treg/audit.py
   - src/treg/application/evidence_retention.py
@@ -64,6 +73,12 @@ sources:
   - tests/test_alembic_expand_safety.py
   - tests/test_redundant_index_migration.py
   - tests/test_api_keys.py
+  - tests/test_money_timing.py
+  - tests/test_money_admission_reporting.py
+  - tests/test_kv_lease_diagnostics.py
+  - tests/test_money_trace.py
+  - tests/test_money_trace_postgres.py
+  - tests/test_money_trace_runner.py
 related:
   - architecture/archive.md
   - architecture/proxy-model.md
@@ -94,6 +109,11 @@ indexed result id and adds `AsyncResourceRecord`: an org/provider/resource-kind/
 for legacy async pairs whose billing does not use a deferred hold. They ship with the behavior
 because old code ignores the additions while new code cannot safely retain an asynchronous hold or
 authorize a shared-provider result without them.
+
+Revision `0069` adds nullable `key_slot` to `AsyncTaskRecord`, `AsyncResourceRecord` and
+`ProviderResource`: the label of the treg-owned account the object lives on, so its polls, fetches
+and edits use that account ([proxy model](proxy-model.md), "Several treg-owned accounts"). NULL is
+every earlier row and means the primary account.
 
 Revision `0052` adds nullable `hit`: the terminal contact verdict for the original submission.
 The terminal finalizer commits it with settlement. The audit writer locks the task row before
@@ -134,6 +154,10 @@ with a retained database default of false for existing rows and old writers. New
 explicitly insert true. No balances or historical money entries change. Successful email proof sets
 verification; only the atomic identity claim consumes availability, committed with the signup grant.
 See [signup eligibility](money.md#signup-credit-eligibility).
+
+Revision `0071` adds `SignupPromoClaim` (`inbox` primary key, `user_id` with no FK, `created_at`):
+one row per mailbox that received the signup gift, staged with the user-level claim. It is
+backfilled from users already verified and no longer eligible.
 
 ## Registry tables
 
@@ -306,6 +330,31 @@ uses this metadata, never the encrypted token's shape.
   walked the primary key testing `org_id` and the second read the team's whole history. The
   Activity feed's calls page by time on `(org_id, created_at)`.
 
+  **Spend per API key is the ledger's, folded the same way.** Revision 0070 adds `ApiKeySpendDay`
+  (team + API key + tool + UTC day -> `spent_micro`, `charges`; primary key
+  `(org_id, day, api_key_id, endpoint_id)`, `api_key_id = 0` for the not-attributed line) and the
+  single-row `ApiKeySpendCursor` (a `(created_at, id)` watermark, `history_from`, `caught_up_at`,
+  `recounted_on`). `application/key_spend_rollup.py`, run as `treg-worker spend rollup`, is the
+  only writer of both, and the Team and Usage pages read only them; see [money](money.md) § Spend
+  per API key. Team deletion clears a team's rows.
+
+  **`ix_callrecord_call_ref`, and why a database could lack it.** The model and revision 0001
+  declare it, so every database Alembic created has it. A database that predates Alembic got
+  `call_ref` from the old `init_db` `ALTER TABLE ... ADD COLUMN`, which adds no index, and was
+  then only stamped at the baseline, so it never ran 0001's `create_index`. There every
+  `call_ref` lookup read the whole audit table: the spend rollup's key lookup
+  (`call_ref IN (...)`), `GET /calls/{call_ref}` and the async hit UPDATE in `audit.py`.
+  Revision 0072 builds it where it is missing: concurrently on Postgres, without the migration
+  statement timeout (a large table takes longer than 120 s), dropping and rebuilding an INVALID
+  index an interrupted build left behind, and leaving a valid one alone. Its downgrade is a no-op,
+  since 0001 owns the index. The general lesson: a stamped database has the baseline's tables,
+  not necessarily its indexes; check `pg_indexes` before relying on one.
+
+  The rollup's ledger walks state the watermark as an index bound, `created_at >= watermark AND
+  (created_at > watermark OR id > watermark_id)`, never as one OR: with the whole condition inside
+  the OR, Postgres bounds the `created_at` index scan only from above and walks it from its oldest
+  row on every batch.
+
   `refused_by` distinguishes a treg refusal (`auth`, `policy`, `balance`, `cap`, `resolution`,
   `request`, and other mechanism-specific values) from an upstream answer, where it is null.
   In-handler audits mark their own outcome; the shared exception handler records earlier
@@ -419,9 +468,16 @@ uses this metadata, never the encrypted token's shape.
   opaque JSON `v` and an `expires_at` (rows are swept lazily). This is the DB home for what used to be
   per-process dicts in the auth HTTP layer (backlog #3): counters can no longer be reset by a redeploy,
   and a per-IP / per-email cap can't be weakened by running more than one instance. The access helpers live in
-  `ratestore.py` (`kv_put`/`kv_get`/`kv_pop`, `rate_check` sliding-window, `sweep`). NOT the CLI-login
-  handshake - that is deliberately still in-process (`application.auth._cli_pending`, short-lived,
-  self-heals on retry).
+  `ratestore.py` (`kv_put`/`kv_get`/`kv_pop`, `rate_check` sliding-window, `sweep`). CLI pairing also uses
+  this table: `application.auth` owns `cli_login` (pending code/attempts or completed result) and
+  `cli_oauth` (social-login return mapping). Their keys hash the login ID or OAuth state; codes,
+  credentials and return login IDs are Fernet-encrypted. Approval locks the pairing row through its
+  transition and Default-key creation; result and OAuth-state consumption use `DELETE RETURNING`.
+  Pending, completed and OAuth entries each expire after `HANDSHAKE_TTL`; reads enforce expiry.
+  `_prune_handshakes` runs on CLI start in a separate transaction, deleting at most 100 expired
+  rows from `cli_login` and `cli_oauth`. PostgreSQL materializes the candidate batch and skips
+  locked rows; unrelated namespaces and live rows are untouched. Further batches run on later starts, so expiry is immediate but
+  physical removal may lag idle periods or a backlog. No schema migration is needed.
 
 - **`DenyRule`** - org policy over what may be CALLED: `org_id`, nullable `user_id` (NULL = the whole
   org, set = one member/agent), nullable `project_id` (NULL = any tool, set = only calls **through**
@@ -494,9 +550,11 @@ parameters compared with timestamp columns follow the same constraint as inserte
 accidental writes, not deliberate SQL that disables the settings. The engine is included in
 disposal, but never schema writes; PostgreSQL also exposes its `read` pool in telemetry.
 An empty URL aliases the existing primary session maker with unchanged write behavior;
-configured datasource failures propagate without primary fallback. No business caller uses this
-datasource yet. Provisioning/replication, replica lag and each caller's write boundaries must be
-handled before opting in; a URL alone does not synchronize databases or add other dialect support.
+configured datasource failures propagate without primary fallback. `/admin/errors` opts in through
+`get_admin_read_session`, which instead uses the admin primary pool when no read URL is configured.
+Its authorization remains on the primary and releases its connection before reading evidence and
+org names. Provisioning/replication, replica lag and each caller's write boundaries must be handled
+before opting in; a URL alone does not synchronize databases or add other dialect support.
 See [deploy](../ops/deploy.md) § Optional read replica for configuration and connection budgeting.
 
 ## Alembic execution and the adoption floor
@@ -575,6 +633,155 @@ gated on `fresh`). Drained in the lifespan `finally` **last** - after `audit.dra
 strands those events behind a cancelled flusher. The engine adds Postgres pool
 hygiene (`pool_pre_ping`/`pool_recycle`/sizing) for non-SQLite URLs, and `verify_db` refuses to start with
 no `TREG_SECRET_KEY` on a real DB (an ephemeral key would lose every stored secret on restart).
+
+`infra.money_timing.observe_money` measures the ordinary call's `reserve`, `close` and `deferred`
+application scopes with local monotonic timers. These cover optional money admission,
+pool acquisition and session cleanup,
+including rollback on failure; reserve also includes its post-commit balance reload. They are not
+pure row-lock durations or a census of all money writers: Hub, billing, direct ledger callers and
+the asynchronous-task worker are outside this observation boundary. Fixed `preflight`, `ledger`,
+`commit` and `post_commit` phases separate admission checks, ledger work, commit and the extra read;
+the ledger phase may itself include the lazy reaper's independent commits. No timer issues SQL,
+awaits, changes a transaction boundary or suppresses a business exception/cancellation.
+
+The existing `bootstrap.pool_gauge` timer drains at most three `money_operation_gauge` events per
+minute, with one final partial window before analytics shutdown. They carry completed scope counts,
+failures (including ordinary refusals), cancellations, SQLSTATE `40P01` failures, elapsed totals and
+maxima, disjoint duration buckets, batch-item counts, per-phase totals/maxima and active-scope peaks.
+An operation's entire duration belongs to its completion window; an active scope crossing a boundary
+remains in the next window's in-flight count. Those counts are not checked-out DB connections. A
+`process_instance` token joins each summary to the same process's `db_pool_gauge`. Neither events nor
+retained aggregates have per-team cardinality. At most the slowest completed scope over one second
+per operation/window produces a WARNING log with its numeric org ID when available, validated opaque
+call ID, batch size, outcome and phase durations; no amount, body or exception message is logged.
+These observations remain best effort through the existing bounded analytics queue.
+
+`infra.money_admission.snapshot` adds bounded `money_admission_gauge` summaries by operation
+(`close`, `deferred`, `async`, `hub`, `reserve`, `release`) and mode (`disabled`, `redis`,
+`fallback`). Eligible calls record the same timing boundary when admission is disabled. An empty
+org list on `close`, `deferred`, `async`, or `hub` still skips the observation. `reserve` and
+`release` with an empty or invalid org raise `AdmissionRefused` before a session and do not record
+a fallback row. `fallback_*` counts, including `fallback_wait_timeout` on `reserve` and `release`,
+are degradation: the body still ran on the database path. A redis lease is the only mode that
+keeps same-org balance sessions from stacking on the pool.
+
+`money_admission_reporting.emit_snapshot` writes one local JSON record and queues one PostHog event
+per populated operation/mode, through the existing web minute timer and final partial window.
+Workers emit their accumulated window on command exit and attempt a bounded analytics drain;
+the local exit summary is the fallback evidence if delivery fails. There are no per-call network
+events or org/call IDs in these aggregates.
+
+`kv_lease_error` is a local diagnostic log, not a PostHog event. Lease exceptions accumulate in
+`infra.kv` by `phase` (`acquire`, `renew`, `release`) and one of seven `error_type` values:
+`deadline_exceeded` (Python timeout), `redis_timeout`, `authentication`, `permission`, `connection`,
+`response`, or `other`. At most 21 buckets retain counts, UTC first/last failure timestamps and
+`elapsed_max_ms`, plus the socket timeout default (1,000 ms) and outer command-attempt deadline
+(1,500 ms). Renewal/release attempts also share a 2,500 ms per-key budget; remaining confirmed
+lease validity can further shorten renewal. URL query overrides can change the effective driver
+socket timeout without changing these reported defaults.
+Elapsed time is client-observed, including connection setup and event-loop scheduling, not Redis
+server execution time. A type narrows the failing boundary; it does not establish a network or
+server root cause by itself. Normal contention and task cancellation are not lease errors.
+Counts describe failed command attempts, including a first renewal or release attempt that a retry
+recovers; they are not counts of failed money transactions or failed lease scopes.
+Admission's renewal/release `kv_errors` increments only for terminal unavailability or an unexpected
+store exception. A recovered failed attempt still appears in diagnostics, but not that counter.
+Confirmed lease validity exhaustion is counted separately as `deadline_expired` once per admission
+scope, alongside `lease_lost`. This includes expiry noticed before renewal, a `deadline_expired`
+store result, a late renewal reply, and the gate's own validity timeout. A store-raised timeout
+before validity expires remains a KV error. Actual command failures remain in attempt diagnostics
+even when validity expires during failure cleanup. These scope counts reach the existing
+`money_admission_gauge` logs and analytics; expiry before a command sends no fictitious attempt.
+
+`MoneyTraceRunner._emit` drains these buckets on its existing minute cadence and at shutdown,
+before its local sink closes. The existing bounded background log sink adds build/process/role
+and writes them; lease operations perform no diagnostic I/O. No exception message, stack, URL,
+key or owner token is retained. Queue/rate/sink/shutdown loss remains possible and is exposed by
+the runner's existing loss/error counters; the absence of a detail log is not proof of no failure.
+The existing `money_admission_gauge` KV/fallback counters remain the independent aggregate signal.
+
+`kv_lease_gauge` reuses the same minute/worker-exit runner for local logs and PostHog. Each actual
+lease command attempt increments an in-memory bucket by phase and fixed outcome; at most 14
+buckets exist per process. Each summary holds `count`, `retry_count`, `elapsed_total_ms`,
+`elapsed_max_ms` and disjoint duration buckets (up to 10, 50, 100, 200 ms, or above 200 ms), with
+build/process/role, window duration and shutdown metadata. `retry_count` counts second renewal/release
+attempts, including failed or cancelled ones. `unavailable` denotes a failed attempt; the local
+`kv_lease_error` supplies its error class. `deadline_expired` denotes a renewal attempt stopped by
+its confirmed-validity timeout, without a KV error. An outer gate timeout can instead cancel the
+command (`cancelled`), while its admission summary records `deadline_expired`. `not_owned` means a release retry found no matching
+token: the earlier delete may have succeeded without a reply, or the lease expired/changed owner.
+It is neither proof of renewed ownership nor a new `lease_lost` observation. Previously detected
+renewal loss remains recorded. Normal `busy` attempts and cancellations have distinct outcomes.
+No org, key, token, URL or exception text is retained. There is no new sampler, probe connection
+or per-command analytics call. A short worker's local exit summary remains authoritative for
+coverage when its analytics tail is undelivered. Logs share existing rate/queue limits; analytics
+remains best effort. Means use elapsed totals divided by attempt counts; buckets bound quantiles,
+not exact p95. Client elapsed time includes connection setup, network and scheduling; these
+measurements alone do not isolate server execution or explain an admission queue's long tail.
+
+`wait_total_ms` / `wait_max_ms` cover admission before the session, including failed-acquisition
+cleanup. `execution_total_ms` / `execution_max_ms` cover the admitted application session scope,
+including pool checkout and rollback/close; they are not measured connection-held time.
+`total_total_ms` / `total_max_ms` include both plus lease cleanup. `completed` counts completed
+scopes, including the `failed` and `cancelled` subsets. Use sums of elapsed totals divided by the
+sum of completed scopes for weighted means. Wait buckets are disjoint upper-bound intervals;
+neither buckets nor minute maxima are per-call p95. `waiting`, `active` and their peaks describe
+this process's scopes, not global simultaneous concurrency or database connections. Whole
+durations and fallback counters belong to completion windows; an unfinished operation can span
+several windows.
+
+`fallback_*`, `lease_lost` and `kv_errors` expose degraded isolation, separately from business
+failures. Join `process_instance`, `build` and `role` to pool and money-operation summaries when
+comparing a rollout. Disabled and enabled org cohorts can have different workloads; a latency
+difference alone is not a causal comparison. Existing `money_operation_gauge` can compare builds
+that predate admission telemetry, but covers a different population and boundary from the
+admission gauge. PostHog remains a lossy diagnostic sink, never the ledger or evidence that an
+individual charge committed.
+
+`infra.money_trace` separately follows the actual database transactions behind the public money
+entries, including grants, top-ups, Hub transfers, batch closes and stale-hold releases. Application
+call scopes also mark preflight and work after ledger updates. `mark_money` only attaches local
+metadata; SQLAlchemy hooks attach a process-unique `app_txn_id` after the connection is acquired and
+read asyncpg's already-known backend PID without executing SQL. A transaction that began before
+the money entry retains its original observed start. Each root transaction ends at commit,
+rollback, invalidation cleanup or session close; savepoints and flushes do not create fictitious
+root transactions. Independent commits in stale-hold recovery produce separate IDs. A backend
+PID is reusable, so investigations must match its time interval and `app_txn_id`, not join all
+records with that PID as one transaction.
+
+`money_stage` marks claim, block locking, balance updates, tag spend, archive-use bookkeeping and
+other money steps; hooks also distinguish flush and commit. Stage exit restores the parent stage
+or `between_stages`. SQL callbacks retain timing and SQLSTATE only, never SQL text, parameters,
+amounts or exception strings. `sql_inflight`, `sql_elapsed_ms`, `last_sql_finished_at` and
+`gap_since_sql_ms` distinguish a statement still awaiting completion from application time after
+the last completed statement. These are client-observed spans: they neither measure server lock
+duration directly nor include the connection-pool wait before a transaction starts.
+
+`money_trace_runner` samples active money transactions once per second. A transaction over one
+second can emit `money_txn_slow` while still open, at most once every five seconds, plus a
+`money_txn_end` record on completion. Both include bounded org/call identities, stage history,
+transaction timestamps and process/build attribution. Active samples inspect only the owning
+task's coroutine locations within `src/treg`, never frame locals or source text. The bounded
+`await_chain` can be partial across SQLAlchemy greenlets; its capture timestamp makes a retained
+sample distinguishable from the ending transaction's current stack. A slow statement alone is
+not proof of deadlock or of which other transaction holds its lock. Correlate PostgreSQL's blocker
+PID with these application records to locate the holder's work.
+
+Collection performs no database/network I/O, adds no awaits to money operations and preserves
+their transaction boundaries and exceptions. Local tracing is independent of the optional
+PostHog key. Active registrations, event queues, stage histories, identities and log output all
+have explicit limits; cumulative drops and diagnostic errors are surfaced by `money_trace_gauge`.
+One daemon thread writes JSON logs through a bounded queue; a blocked logging sink cannot block
+the event loop or indefinitely delay worker shutdown. The minute gauge reports sampler freshness,
+event-loop wakeup delay and output health, without org/call cardinality. A delayed wakeup suggests
+scheduler starvation but does not identify its cause. If the loop is stalled, sampling is also
+stalled; missing samples or dropped records are evidence limitations, never proof of no blockers.
+The runner emits a final partial local window during shutdown. Worker PostHog delivery remains
+best effort; short-lived workers are verified from local logs rather than an assumed final network
+flush. The PostgreSQL CI job also runs the trace acceptance tests: they reproduce a real lock
+holder and waiter and require an attributable holder
+snapshot before either transaction completes, along with cancellation, cleanup and no-extra-SQL
+checks.
 
 Arena adds `arena_run_started` / `arena_run_completed` after its claim/final save; ordinary
 `tool_called.client=enrich-arena` still attributes each lookup, Try and verification. Browser

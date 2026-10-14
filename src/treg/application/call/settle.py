@@ -26,9 +26,14 @@ from ...domain.asynctasks import json_path
 from ...domain.money import settlement as settlement_basis
 from ...domain.catalog import store as catalog_store
 from ...infra.db import session_maker
+from ...infra import money_admission
+from ...infra.money_session import money_session
+from ...infra.money_timing import observe_money
+from ...infra.money_trace import mark_money, money_stage
 from ...models import Org
 from ...timeutil import utcnow_naive as _utcnow_naive
 from .idempotency import _release_idempotent_claim
+from . import keyslots
 from .resolve import MarketplaceCall, _openmart_credits, _usd_to_micro
 from .types import GatewayFailed, UpstreamResponse
 
@@ -42,6 +47,15 @@ from .types import GatewayFailed, UpstreamResponse
 # is not to charge. Absorbing a rare few micro-USD is recoverable; over-billing out of an append-only
 # ledger is not.
 _NOT_THE_CALLERS_FAULT = frozenset({401, 402, 403, 405, 407, 408, 429})
+
+
+def _consumes_blocks(*, billable: bool, actual_micro: int | None, reserved_micro: int | None) -> bool:
+    """True when this close will draw credit blocks, the existing close/deferred admission case."""
+    if not billable:
+        return False
+    if actual_micro is not None:
+        return actual_micro > 0
+    return reserved_micro is None or reserved_micro > 0
 
 
 def _apify_call_fee_micro(mk: MarketplaceCall, cost: dict) -> int:
@@ -187,6 +201,12 @@ def _companyenrich_record_count(endpoint_id: str, doc: object) -> int | None:
         return None
     # 2 credits per person, minimum 1 unit charged (the 2-credit minimum on empty)
     return max(len(items), 1)
+
+
+def _aviato_bulk_hits(rows: list) -> int:
+    """Rows of an Aviato bulk enrich answer that Aviato bills. Every lookup answers a row, and a
+    failed one is `{"lookupSuccessful": false}` with no record, which is free."""
+    return sum(1 for row in rows if isinstance(row, dict) and row.get("lookupSuccessful") is True)
 
 
 def _icypeas_bulk_found_count(endpoint_id: str, doc: object) -> int | None:
@@ -438,10 +458,10 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
       - lusha: `billing.creditsCharged`, one level down — the same reported-credits contract,
         including 0 on a 2xx miss (the captured people.enrich example IS one) and the 2-credit
         company enrich. Converted through the lusha rate like the others.
-      - apollo: DERIVED, not reported. Apollo answers a miss with 2xx (`organization: null` on
-        enrich, an empty `organizations` page on search) and charges nothing for it, so status-based
-        billing alone would bill the caller for a response Apollo gave away. The body says whether
-        the charged thing came back; when it didn't, the call settles at 0.
+      - apollo: DERIVED, not reported. Apollo answers a miss with 2xx (`organization: null` or a
+        bare `{}` on enrich, an empty `organizations` page on search) and charges nothing for it, so
+        status-based billing alone would bill the caller for a response Apollo gave away. The body
+        says whether the charged thing came back; when it didn't, the call settles at 0.
       - hunter (domain search): DERIVED too, and for the opposite reason — its price is not
         per row but one whole SEARCH credit per 10 emails returned, rounded up, with an empty
         domain free. `data.emails` is the only place that number exists.
@@ -551,7 +571,7 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
             mk.settlement_basis["enrichlayer_unit_micro"], doc, mk.estimate_micro)
     if provider == "aviato" and mk.endpoint_id == "aviato.people.enrich.bulk":
         if isinstance(doc, list) and mk.unit_micro > 0:
-            return sum(item is not None for item in doc) * mk.unit_micro
+            return _aviato_bulk_hits(doc) * mk.unit_micro
         return None
     if provider == "companyenrich" and mk.cost_type == "per_result" and mk.unit_micro > 0:
         return _rows_billed_micro(mk, ep, _companyenrich_record_count(mk.endpoint_id, doc))
@@ -664,7 +684,7 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
     if provider == "aviato" and mk.endpoint_id == "aviato.companies.enrich.bulk":
         rows = doc.get("companies")
         if isinstance(rows, list) and mk.unit_micro > 0:
-            return sum(item is not None for item in rows) * mk.unit_micro
+            return _aviato_bulk_hits(rows) * mk.unit_micro
         return None
     if provider == "aviato" and cost and cost.get("settle") == "modifiers" and mk.unit_micro > 0:
         # The request-time unit excludes catalog modifiers marked reserve_only. Bulk routes above
@@ -793,14 +813,16 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
     if provider == "apollo":
         # Only the shapes whose billing rule is documented and body-decidable: company enrichment
         # (1 credit per organization returned, null on a miss) and company search (1 credit per
-        # non-empty PAGE). A body carrying neither key — people enrichment's 1-9 credit range
-        # included — falls through to the estimate rather than guessing.
+        # non-empty PAGE). When those keys are present, decide here. When they are absent — a
+        # live companies.enrich miss is bare `{}`, and people enrichment's 1-9 credit range has
+        # neither key — do not return None: fall through so the GENERIC miss / adapter rule can
+        # zero a verified companies.enrich miss, while people enrichment still settles at the
+        # estimate (no organization keys, adapter miss is on `person`).
         rate = catalog_store.load().credit_rates.get("apollo")
         if rate:
             for key in ("organization", "organizations"):
                 if key in doc:
                     return int(rate * 1_000_000 + 0.5) if doc[key] else 0
-        return None
     # GENERIC miss rule: a `per_success` endpoint bills only when it found something, and the
     # routing adapter (catalog/adapters.yaml, fixture-verified at load) already knows what "nothing"
     # looks like in this provider's body. Before this, tomba / findymail / leadsforge misses settled
@@ -1190,6 +1212,7 @@ async def _platform_settle(
         # a crash in between leaves the hold to the reaper, which releases in the caller's favour.
         mk.deferred.append(DeferredSettle(
             call_id=call_id, billable=billable, actual_micro=actual, archive_use=archive_use,
+            payer_org_id=mk.payer_org_id, reserved_micro=mk.reserved_micro,
             reason=reason or f"not_billable_{status_code}",
             meta={"provider": mk.provider, "status_code": status_code, "cost_type": mk.cost_type,
                   "cost_source": ("provider" if observed is not None else
@@ -1202,33 +1225,54 @@ async def _platform_settle(
                  else ledger.with_margin(mk.estimate_micro)) if billable else 0
         return would, observed
 
+    # A block draw keeps the close lease. A release or a full refund still updates the balance
+    # row, so it takes the release lease instead of an empty admit. One admit, around this session.
+    consumes_blocks = _consumes_blocks(
+        billable=billable, actual_micro=actual, reserved_micro=mk.reserved_micro)
+    admission_operation = "close" if consumes_blocks else "release"
+    try:
+        admission_orgs = money_admission.require_balance_orgs([mk.payer_org_id])
+    except money_admission.AdmissionRefused:
+        logging.getLogger("treg.ledger").error(
+            "settle/release refused before checkout for call %s: missing org identity", call_id)
+        return charged, observed
+
     async def _close() -> int:
-        async with session_maker() as db:
-            if billable:
-                charged = await ledger.settle_in_transaction(db, call_id, actual, meta={
-                    "provider": mk.provider, "status_code": status_code, "cost_type": mk.cost_type,
-                    "cost_source": ("aggregator" if overflow_spend is not None else
-                                    "provider" if observed is not None else
-                                    mk.settlement_basis.get("amount", {}).get("kind", "estimate")),
-                    **({"served_via": f"overflow:{overflow_spend[0]}"} if overflow_spend else {}),
-                    **({"cached": True,
-                        "cache_price_percent": repeat_percent if cached_repeat else 100}
-                       if cached_hit else {})})
-                if archive_use is not None:
-                    await archive.note_org_use_in_transaction(db, archive_use[0], archive_use[1])
-            else:
-                await ledger.release_in_transaction(
-                    db, call_id, reason=reason or f"not_billable_{status_code}",
-                    meta={"provider": mk.provider, "cost_type": mk.cost_type,
-                          "status_code": status_code})
-                charged = 0
-            if overflow_spend is not None:
-                await overflow_spend_ledger.add_in_transaction(
-                    db, overflow_spend[0], overflow_spend[1], overflow_spend[2])
-            await db.commit()
-            if finalized is not None:
-                finalized()
-            return charged
+        with observe_money("close", call_id=call_id) as timing:
+            async with (
+                money_admission.admit(admission_orgs, operation=admission_operation),
+                money_session(session_maker()) as db,
+            ):
+                mark_money(db, "close", call_id=call_id)
+                with timing.phase("ledger"):
+                    if billable:
+                        charged = await ledger.settle_in_transaction(db, call_id, actual, meta={
+                            "provider": mk.provider, "status_code": status_code, "cost_type": mk.cost_type,
+                            "cost_source": ("aggregator" if overflow_spend is not None else
+                                            "provider" if observed is not None else
+                                            mk.settlement_basis.get("amount", {}).get("kind", "estimate")),
+                            **({"served_via": f"overflow:{overflow_spend[0]}"} if overflow_spend else {}),
+                            **({"cached": True,
+                                "cache_price_percent": repeat_percent if cached_repeat else 100}
+                               if cached_hit else {})})
+                        if archive_use is not None:
+                            with money_stage(db, "archive_use"):
+                                await archive.note_org_use_in_transaction(db, archive_use[0], archive_use[1])
+                    else:
+                        await ledger.release_in_transaction(
+                            db, call_id, reason=reason or f"not_billable_{status_code}",
+                            meta={"provider": mk.provider, "cost_type": mk.cost_type,
+                                  "status_code": status_code})
+                        charged = 0
+                    if overflow_spend is not None:
+                        with money_stage(db, "overflow_spend"):
+                            await overflow_spend_ledger.add_in_transaction(
+                                db, overflow_spend[0], overflow_spend[1], overflow_spend[2])
+                with timing.phase("commit"):
+                    await db.commit()
+                if finalized is not None:
+                    finalized()
+                return charged
 
     try:
         try:
@@ -1260,6 +1304,8 @@ class DeferredSettle:
     archive_use: tuple[int, str] | None
     reason: str
     meta: dict
+    payer_org_id: int | None = None
+    reserved_micro: int | None = None
 
 
 async def close_deferred(items: list[DeferredSettle], *, charge: bool, why: str = "") -> int:
@@ -1270,19 +1316,39 @@ async def close_deferred(items: list[DeferredSettle], *, charge: bool, why: str 
     if not items:
         return 0
     pending, items[:] = list(items), []
+    # One session closes every hold. A batch that draws blocks stays `deferred` and also leases
+    # orgs that this same session only refunds. A batch that only releases or refunds is `release`.
+    consumes = any(_consumes_blocks(
+        billable=charge and d.billable, actual_micro=d.actual_micro, reserved_micro=d.reserved_micro)
+        for d in pending)
+    admission_operation = "deferred" if consumes else "release"
     total = 0
     try:
-        async with session_maker() as db:
-            for d in pending:
-                if charge and d.billable:
-                    total += await ledger.settle_in_transaction(db, d.call_id, d.actual_micro, meta=d.meta)
-                    if d.archive_use is not None:
-                        await archive.note_org_use_in_transaction(db, d.archive_use[0], d.archive_use[1])
-                else:
-                    await ledger.release_in_transaction(
-                        db, d.call_id, reason=d.reason if charge else (why or "routed_call_failed"),
-                        meta=d.meta)
-            await db.commit()
+        admission_orgs = money_admission.require_balance_orgs([d.payer_org_id for d in pending])
+        with observe_money("deferred", batch_size=len(pending)) as timing:
+            async with (
+                money_admission.admit(admission_orgs, operation=admission_operation),
+                money_session(session_maker()) as db,
+            ):
+                mark_money(db, "deferred", batch_size=len(pending))
+                with timing.phase("ledger"):
+                    amounts = await ledger.close_holds_in_transaction(db, [
+                        ledger.HoldClose(
+                            d.call_id, charge and d.billable, d.actual_micro,
+                            d.reason if charge else (why or "routed_call_failed"), d.meta)
+                        for d in pending
+                    ])
+                    total = sum(amount for d, amount in zip(pending, amounts) if charge and d.billable)
+                    # Archive marks take row/unique-key locks after ALL money writes, including
+                    # zero-cost batches. The batch writer keeps a stable order and counts repeats
+                    # without one database round trip per child while money locks remain held.
+                    uses = [d.archive_use for d in pending
+                            if charge and d.billable and d.archive_use is not None]
+                    if uses:
+                        with money_stage(db, "archive_use"):
+                            await archive.note_org_uses_in_transaction(db, uses)
+                with timing.phase("commit"):
+                    await db.commit()
     except Exception as exc:  # noqa: BLE001 — loudly, but never into the caller's response
         logging.getLogger("treg.ledger").error(
             "closing %d deferred routed holds (charge=%s) failed: %s", len(pending), charge, exc,
@@ -1296,6 +1362,8 @@ async def _finish_cancelled_call(
     mk: MarketplaceCall | None,
     call_ref: str,
     response: UpstreamResponse | None = None,
+    *,
+    trusted_org_id: int | None = None,
 ) -> None:
     """Finish compensation before propagating cancellation from a call that may have reserved."""
     # A cancelled request cannot own this cleanup: another cancellation while it is returning the
@@ -1315,18 +1383,26 @@ async def _finish_cancelled_call(
             # conditionally claims it: committed means refund, rolled back means a safe no-op.
             mk.call_id = None
             try:
-                async with session_maker() as cleanup_db:
+                # A parent reserve already stored mk.payer_org_id. Overflow cancel passes
+                # the authenticated caller instead, including skip-direct, where the parent
+                # field stays empty. Do not copy that caller onto the parent.
+                release_org = trusted_org_id if trusted_org_id is not None else mk.payer_org_id
+                # Upstream close already finished above. The lease covers only this balance session.
+                async with (
+                    money_admission.admit(
+                        money_admission.require_balance_orgs([release_org]), operation="release"),
+                    money_session(session_maker()) as cleanup_db,
+                ):
                     # The parent hold AND the overflow child's (`{call_ref}:overflow`, plan §4.3
                     # step 2): each release is a conditional claim, so a hold that never existed or
                     # was already closed is a safe no-op, and both are released exactly once.
-                    for hold_id in (call_ref, f"{call_ref}:overflow"):
-                        await ledger.release_in_transaction(
-                            cleanup_db,
-                            hold_id,
-                            reason="call_cancelled",
+                    await ledger.close_holds_in_transaction(cleanup_db, [
+                        ledger.HoldClose(
+                            hold_id, False, reason="call_cancelled",
                             meta={"provider": mk.provider, "cost_type": mk.cost_type,
-                                  "status_code": None},
-                        )
+                                  "status_code": None})
+                        for hold_id in (call_ref, f"{call_ref}:overflow")
+                    ])
                     await cleanup_db.commit()
             except (Exception, asyncio.CancelledError):  # noqa: BLE001
                 logging.getLogger("treg.ledger").error(
@@ -1363,7 +1439,7 @@ async def _note_capacity_signal(mk: MarketplaceCall, status_code: int, headers, 
         if capacity_signatures.is_exhausting(signal):
             lock = await capacity_marks.strike(
                 mk.provider, endpoint_id=mk.endpoint_id, kind=signal.kind,
-                resets_at=signal.resets_at,
+                resets_at=signal.resets_at, slot=keyslots.capacity_slot(mk.key_slot),
                 note=f"{signal.kind} signature on {mk.endpoint_id}: {signal.detail[:80]}")
             capacity_view.invalidate()
             if lock is not None and lock.is_active():
@@ -1400,7 +1476,9 @@ async def _note_capacity_recovery(mk: MarketplaceCall) -> None:
     try:
         await capacity_view.load()
         cleared = False
-        for lock in capacity_view.locks(mk.provider, mk.endpoint_id):
+        # A free route's 2xx says nothing about the balance: it clears only its endpoint's own row.
+        for lock in capacity_view.locks(mk.provider, mk.endpoint_id, keyslots.capacity_slot(mk.key_slot),
+                                        metered=capacity_marks.spends_balance(mk.cost_type)):
             if lock.is_active() and lock.lock_id != mk.probe_lock_id:
                 continue
             if await capacity_marks.clear(lock.key, lock_id=mk.probe_lock_id):

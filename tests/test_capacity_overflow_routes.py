@@ -280,7 +280,6 @@ _UNRECORDED_SIGNATURE = {
     "harvestapi",  # wallet exhaustion unobserved; no overflow route
     "quickenrich",  # subscription exhaustion not observed; do not spend the trial to force it
     "dropleads",  # free trial was not exhausted; no provider-specific 402 body recorded
-    "prospeo",  # Starter allowance was not exhausted; no provider-specific body was forced
     "aiark",  # funded allowance was not exhausted; no provider-specific body was forced
     "wiza",  # The funded grant was not exhausted; no provider-specific body was forced
     "limadata",  # Starter credits remain; no provider-specific empty-balance body was forced
@@ -315,6 +314,7 @@ _UNRECORDED_SIGNATURE = {
     "you",  # funded wallet remains; no provider-specific empty-balance response was forced
     "valyu",  # subscription credits remain; no provider-specific empty-balance response was forced
     "octen",  # PAYG balance remains; no provider-specific empty-balance response was forced
+    "parallel",  # funded balance remains; documented 402 insufficient credit was not forced
     "enrichlayer",  # PAYG auto top-up remains funded; the docs name 403 but not its response body
 
     "serpapi", "serpstat", "spyfu", "tiingo", "tikhub", "tomba", "twelvedata",

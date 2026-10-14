@@ -6,8 +6,10 @@
     treg-worker asynctasks settle [--limit 50]       # complete deferred metered-call holds
     treg-worker arena insights [--max-seconds 110]   # fold new audit rows into the Arena aggregate
     treg-worker catalog stats [--max-rows 500000]    # fold new audit rows into per-day endpoint stats
+    treg-worker spend rollup [--max-rows 50000]      # fold new ledger settles into per-key daily spend
     treg-worker jev xboost [--posts 60] [--min-likes 150]   # the /jev launch-radar demo: X posts <24h -> jev
     treg-worker admin purge-evidence [--batch-size 5000]  # blank expired error evidence past 14-day retention
+    treg-worker admin erase-archive --org <id>             # erase what an opted-out team stored in the archive
 
 Not the light `treg` CLI: these need the server extra (DB, platform keys in the env) and make
 outbound calls to third parties, so they run as Render cron jobs with the server's env — never as
@@ -242,7 +244,9 @@ async def _overflow_verify(args) -> int:
 async def _asynctasks_settle(args) -> int:
     from .infra.db import verify_db
     from .application.asynctasks import settle_due
+    from .application.call import keyslots
 
+    keyslots.check_accounts()  # polls use treg's accounts: an unusable one refuses to start
     await verify_db()
     result = await settle_due(limit=args.limit)
     print(json.dumps(result.__dict__, sort_keys=True))
@@ -259,6 +263,8 @@ async def _hub_check(args) -> int:
     from .application.hub.health import check_as_maker
     from .infra.db import session_maker, verify_db
     from .models import HubTool
+    from .application.call import keyslots
+    keyslots.check_accounts()  # checks make platform calls: an unusable account refuses to start
     await verify_db()
     if not hub_enabled():
         print("hub is off (TREG_HUB_ENABLED); nothing to check")
@@ -335,6 +341,16 @@ async def _catalog_stats(args) -> int:
     return 0
 
 
+async def _spend_rollup(args) -> int:
+    from .infra.db import verify_db
+    from .application.key_spend_rollup import refresh
+
+    await verify_db()
+    result = await refresh(max_rows=args.max_rows, max_recount_seconds=args.max_recount_seconds)
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 async def _jev_xboost(args) -> int:
     import httpx
 
@@ -366,11 +382,57 @@ async def _admin_purge_evidence(args) -> int:
     return 1 if result.get("error") else 0
 
 
+async def _admin_erase_archive(args) -> int:
+    """Erase what one opted-out team stored in the archive (application/archive_erasure): the
+    answer to an erasure request. Refuses a team still in the archive; opt it out first."""
+    from . import bootstrap
+    from .application import archive_erasure
+    from .infra.db import verify_db
+
+    await verify_db()
+    try:
+        async with bootstrap.archive_object_store():
+            result = await archive_erasure.erase_org(args.org)
+    except archive_erasure.NotOptedOut as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def _positive_int(value: str) -> int:
     n = int(value)
     if n < 1:
         raise argparse.ArgumentTypeError("must be >= 1")
     return n
+
+
+async def _run_command(args) -> int:
+    from . import analytics
+    from .infra import kv
+    from .infra.money_admission_reporting import emit_snapshot
+    from .infra.money_trace_runner import money_trace_lifespan
+
+    # In particular, async hold settlement runs here without any web application's lifespan.
+    try:
+        async with money_trace_lifespan(role="worker"):
+            try:
+                return await args.fn(args)
+            finally:
+                try:
+                    emit_snapshot(role="worker", shutdown=True)
+                except Exception:  # noqa: BLE001 - preserve the command's result/failure
+                    pass
+                finally:
+                    await kv.close()
+    finally:
+        try:
+            # The trace lifespan also queues lease/trace exit summaries. Drain once after all
+            # producers stop; a short worker must not queue its tail after its final send.
+            async with asyncio.timeout(1):
+                await analytics.drain()
+        except Exception:  # noqa: BLE001 - local exit summaries remain the fallback evidence
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -426,6 +488,14 @@ def main(argv: list[str] | None = None) -> int:
     stats.add_argument("--max-rows", type=int, default=500_000,
                        help="audit rows to consume in one run; the next run resumes from the cursor")
     stats.set_defaults(fn=_catalog_stats)
+    spend = sub.add_parser("spend", help="spend read models derived from the ledger")
+    spendsub = spend.add_subparsers(dest="cmd", required=True)
+    rollup = spendsub.add_parser("rollup", help="fold new ledger settles into per-key, per-tool, per-day spend")
+    rollup.add_argument("--max-rows", type=_positive_int, default=50_000,
+                        help="settle entries to fold in one run; the next run resumes from the cursor")
+    rollup.add_argument("--max-recount-seconds", type=float, default=60.0,
+                        help="time one run spends on the daily recount; the next run resumes it")
+    rollup.set_defaults(fn=_spend_rollup)
     jev = sub.add_parser("jev", help="the /jev landing-page demos")
     jevsub = jev.add_subparsers(dest="cmd", required=True)
     xb = jevsub.add_parser("xboost", help="launch posts on X from the last 24h -> forensics -> jev; stores the run for /jev")
@@ -439,9 +509,12 @@ def main(argv: list[str] | None = None) -> int:
     purge.add_argument("--batch-size", type=_positive_int, default=5000,
                        help="rows to update per transaction (default 5000)")
     purge.set_defaults(fn=_admin_purge_evidence)
+    erase = adminsub.add_parser("erase-archive", help="erase what an opted-out team stored in the archive")
+    erase.add_argument("--org", type=_positive_int, required=True, help="the team's org id")
+    erase.set_defaults(fn=_admin_erase_archive)
     args = ap.parse_args(argv)
     _need_server()
-    return asyncio.run(args.fn(args))
+    return asyncio.run(_run_command(args))
 
 
 if __name__ == "__main__":

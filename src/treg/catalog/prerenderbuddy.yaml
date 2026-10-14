@@ -22,6 +22,7 @@ proposed_capabilities:
   web.content.ideas: List tracked questions with recorded evidence suitable for article proposals
 endpoints:
 - id: prerenderbuddy.sites
+  added: '2026-10-14'
   capability: web.sites.list
   platform: web
   domain: account
@@ -48,6 +49,7 @@ endpoints:
   test_request:
     queryParams: {}
 - id: prerenderbuddy.usage
+  added: '2026-10-14'
   capability: account.usage
   platform: account
   domain: account
@@ -74,6 +76,7 @@ endpoints:
   test_request:
     queryParams: {}
 - id: prerenderbuddy.overview
+  added: '2026-10-14'
   capability: web.site.overview
   platform: web
   domain: overview
@@ -108,6 +111,7 @@ endpoints:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
 - id: prerenderbuddy.health
+  added: '2026-10-14'
   capability: web.monitoring.evidence
   platform: web
   domain: health
@@ -142,6 +146,7 @@ endpoints:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
 - id: prerenderbuddy.activity
+  added: '2026-10-14'
   capability: web.crawlers.activity
   platform: web
   domain: activity
@@ -191,6 +196,7 @@ endpoints:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
 - id: prerenderbuddy.visibility
+  added: '2026-10-14'
   capability: ai-search.mentions.summary
   platform: ai-search
   domain: visibility
@@ -233,6 +239,7 @@ endpoints:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
 - id: prerenderbuddy.recommendations
+  added: '2026-10-14'
   capability: web.improvements.recommendations
   platform: web
   domain: recommendations
@@ -267,6 +274,7 @@ endpoints:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
 - id: prerenderbuddy.content
+  added: '2026-10-14'
   capability: web.content.status
   platform: web
   domain: content
@@ -309,6 +317,7 @@ endpoints:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
 - id: prerenderbuddy.ideas
+  added: '2026-10-14'
   capability: web.content.ideas
   platform: web
   domain: ideas
@@ -351,6 +360,7 @@ endpoints:
     pathParams:
       id: ea91b853-1445-4be6-b0db-c63303c0e4d5
 - id: prerenderbuddy.api.balance
+  added: '2026-10-14'
   capability: account.usage
   platform: account
   domain: account
@@ -377,6 +387,7 @@ endpoints:
   test_request:
     queryParams: {}
 - id: prerenderbuddy.chatgpt.answer
+  added: '2026-10-14'
   capability: ai-search.chatgpt.answer
   platform: ai-search
   domain: chatgpt
@@ -460,6 +471,7 @@ endpoints:
         name: Prerender Buddy
         domain: prerenderbuddy.com
 - id: prerenderbuddy.claude.answer
+  added: '2026-10-14'
   capability: ai-search.claude.answer
   platform: ai-search
   domain: claude
@@ -539,6 +551,7 @@ endpoints:
       prompt: What does Prerender Buddy do? Answer briefly with sources.
       brand: *id002
 - id: prerenderbuddy.gemini.answer
+  added: '2026-10-14'
   capability: ai-search.gemini.answer
   platform: ai-search
   domain: gemini
@@ -618,6 +631,7 @@ endpoints:
       prompt: What does Prerender Buddy do? Answer briefly with sources.
       brand: *id002
 - id: prerenderbuddy.perplexity.answer
+  added: '2026-10-14'
   capability: ai-search.perplexity.answer
   platform: ai-search
   domain: perplexity
@@ -697,6 +711,7 @@ endpoints:
       prompt: What does Prerender Buddy do? Answer briefly with sources.
       brand: *id002
 - id: prerenderbuddy.answer.status
+  added: '2026-10-14'
   capability: web.answer.status
   platform: web
   domain: answer
