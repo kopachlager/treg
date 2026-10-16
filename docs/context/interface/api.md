@@ -187,6 +187,30 @@ path or an exhausted reading from the sweep lets one call a minute through as a 
 its 2xx, so the `message` says a retry in a minute may succeed; otherwise it lasts until `resets_at`. Not the pool-saturation 503
 (`treg_saturated`), which is a different exit. See `architecture/proxy-model.md` § Platform capacity.
 
+## Published organization admission refusals
+
+When the default-disabled [published Org flow-control gate](../architecture/org-flow-control.md)
+is enabled, authenticated root calls through `/call/`, `/catalog/call/`, `/table/` and their MCP
+adapters can be refused before body consumption, money admission or provider work:
+
+| HTTP 429 `detail.error` | Meaning | `Retry-After` |
+| --- | --- | --- |
+| `org_traffic_paused` | The published `pause_until` is still in the future. | Whole seconds rounded up to expiry. |
+| `org_rate_limit` | The published `rate_limit:{rps,burst}` bucket lacks one token. | Whole seconds rounded up to the next token, at least 1 and capped at 2147483647. |
+| `org_concurrency_limit` | The published `concurrency_limit.max_in_flight` slots are occupied. | 1 second. |
+
+The detail includes `config_version` and integer `retry_after_s`; normal `X-Treg-Error`,
+`X-Treg-Call-Id` and refusal-audit behavior is retained. MCP call/media results preserve retry
+guidance. Requests do not wait in a queue. Rate and concurrency are checked atomically; a
+refusal consumes neither token nor slot. A rate token already consumed on admission is not
+refunded after failure or cancellation. Retry guidance does not reserve future capacity.
+
+Each null published field disables that limit, with no static fallback. The gate shares capacity
+across the Org's API keys and workers, including own-key calls without changing billing. Direct
+hub runs, provider-resource requests and application/background work outside the shared root
+surface are excluded. Authentication still precedes the gate. Redis unavailability allows new
+work; accepted requests and financial cleanup continue unchanged.
+
 ## `503 provider_paused` - this deployment paused the provider
 
 `TREG_PAUSED_PROVIDERS` (comma-separated service ids) pauses a provider on one deployment. Every
@@ -228,6 +252,17 @@ and the exhausted provider, and `GET /catalog/endpoints/{id}` / `catalog_get` ca
 `overflow_price_usd`, `overflow_price_unit` and `overflow_via` on a platform-eligible endpoint the
 deployment can relay - the price a "free" endpoint may actually bill, stated before the call.
 
+## `X-Treg-Upstream-Failed` - the provider said this 2xx failed
+
+`<json_path>=<value>` on a metered 2xx whose body fails the endpoint's own `expect` success rule,
+for example `tasks.0.status_code=40101` when a DataForSEO task failed under a 20000 envelope. The
+body is relayed untouched and `X-Treg-Cost-Micro` is what the provider reported for the attempt
+(settlement is unchanged). Such an answer is never archived or replayed and never counts as found.
+The MCP `call` result carries it as `upstream_failed` with a `hint`, `treg call` prints a stderr
+line, and `treg --json call` puts it in `_treg.upstream_failed`. A routed child that fails this way
+is a `miss` whose `detail` names the failed value. Absent on an overflow answer, an idempotent
+replay, and every unmetered call.
+
 ## `X-Treg-Smoothed` - the call waited for treg's own rate limit
 
 On platform calls, including owned free polling: `wait=<ms>` when the call was spaced behind other callers on the
@@ -246,6 +281,15 @@ tell treg's 404 ("no tool registered for that host") from the vendor's own 404: 
 some JSON. The [local proxy](../architecture/local-proxy.md) needs that distinction to explain a failure
 without ever rewriting a real vendor response. `application.call` failures carry a mechanism `kind`
 and separately mapped `blame`; the compatibility header remains the literal `1`.
+
+When enabled money admission exhausts its configured reserve wait, `reserve_admission` refuses
+before the funds transaction with HTTP 429, `detail.error: money_admission_timeout`, blame `treg`
+and `Retry-After` with integer-second jitter from `money_admission_retry_after_s` through twice
+that value (inclusive). No hold is created and no upstream request starts for that attempt. Both
+MCP surfaces preserve the underlying status and expose the retry header as `retry_after`.
+The 429 is not stored under `Idempotency-Key`: normal error cleanup releases its pending claim,
+so the same key can retry. A database failure during that cleanup can still strand the pending
+claim under the existing 409/410 recovery behavior (see money.md, "Idempotency and retries").
 
 `routers.auth_helpers.require_managed_cli` also sets `X-Treg-Error: 1` on its HTTP 426
 update response. Released CLIs therefore identify this as a treg refusal instead of a provider
@@ -326,8 +370,8 @@ shared HTTP client. `/auth/logout` remains an HTTP-only cookie action.
   made); old accounts cannot reclaim it.
   The dashboard/CLI login doors do NOT go
   through it (they create the user only, no auto org). Both this door and `create_org` read the
-  first-party `treg_ad` cookie (`_ad_attribution_from`) and, when conversion tracking is enabled,
-  stamp `Org.ad_gclid`/`ad_click_id_type`/`ad_landing`/`ad_click_at` on the new org when present - see
+  first-party `treg_ad` cookie (`_ad_attribution_from`), falling back to the email's `AdClickStash`
+  row when the request has no cookie, and, when conversion tracking is enabled, stamp `Org.ad_gclid`/`ad_click_id_type`/`ad_landing`/`ad_click_at` on the new org when present - see
   [ads-conversions](../architecture/ads-conversions.md).
   `create_org` (`POST /orgs`, `require_identity` so a
   zero-org user can make their first team; HTTP 403 when already owning 10 teams) + `list_orgs` (`GET /orgs`,
@@ -383,7 +427,9 @@ shared HTTP client. `/auth/logout` remains an HTTP-only cookie action.
 - **Usage metering + caps** (usage-metering v1, `docs/USAGE-METERING-PLAN.md`): `org_usage`
   (`GET /orgs/{id}/usage?days=`, admin+) rolls up `CallRecord` + `RunRecord` since the window start into
   **by-user** (with a `call`/`local_run`/`server_run` split), **by-tool**, **by-day**, and totals - pure
-  `GROUP BY`, **no request/response bodies** (they aren't stored). `set_member_cap`
+  `GROUP BY`, **no request/response bodies** (they aren't stored). It reads the window's audit rows
+  twice, not once per section: one grouped pass answers member, kind and tool together, and the
+  per-day count is the second. `set_member_cap`
   (`PATCH /orgs/{id}/members/{user}/cap`, admin+) sets `Membership.daily_call_cap` (`-1` = unlimited,
   rejects `< -1`). `my_usage` (`GET /usage/me`, any member) returns the caller's own `used_today` + `cap`.
   `list_members` also returns each member's `daily_call_cap` + `used_today`. **Enforcement:**
@@ -481,7 +527,7 @@ shared HTTP client. `/auth/logout` remains an HTTP-only cookie action.
   |---|---|
   | `GET /catalog/platforms` | Non-empty platforms with capability/endpoint counts and providers, ordered by endpoint count; `providers` names every browsable vendor |
   | `GET /catalog/platforms/{slug}` | Capabilities, extended endpoints, dashboard domain rows (a row whose capability at least two providers serve there carries `compare`, its URL key) and provider metadata; an endpoint teams' agents have reviewed carries `reviews` (`architecture/feedback.md`: scored past five teams, quoted as early before), and every endpoint its `observed` calls (the same snapshot search ranks on); unknown slug is 404 |
-  | `GET /catalog/search?q=&limit=&added_within_days=&sort=` | Ranked endpoint views, count/total and hints; default 25, maximum 100. Listed hub tools merge into the same ranking by score (see [hub](../architecture/hub.md)); a hub row's run hint is its own `treg call <id> --data` line, since it has no catalog row or provider key. `added_within_days` (1-365, capped above with `capped_at_days`) and `sort=newest` list recently added tools, `q` optional; absent, the answer is unchanged apart from each row's `added` (see [catalog](../architecture/catalog.md)) |
+  | `GET /catalog/search?q=&limit=&added_within_days=&sort=&engine=` | Ranked endpoint views, count/total and hints; default 25, maximum 100. A query naming a provider with a task leads with that provider's rows, says so in `led_by`, and shows no `score`. `engine=agent` (the CLI's search) answers with the use case behind MCP `catalog_search` in this route's row shape, plus `engine`, the answer's `verdict`, `reason` and `jobs` where v2 answered (see [search-experiment](../architecture/search-experiment.md)). Listed hub tools merge into the same ranking by score (see [hub](../architecture/hub.md)); a hub row's run hint is its own `treg call <id> --data` line, since it has no catalog row or provider key. `added_within_days` (1-365, capped above with `capped_at_days`) and `sort=newest` list recently added tools, `q` optional; absent, the answer is unchanged apart from each row's `added` (see [catalog](../architecture/catalog.md)) |
   | `GET /catalog/find?q=` | Find tools for a described job: NDJSON stream of `candidates` then `judged` (verdict + kept rows with probabilities; a bare platform or provider name gets verdict `name` and its endpoints, unjudged; under `find_engine=v2` the recall is by job and the events add `units`, `reason`, `platform`, `engine`, and rows `fit_from` / `children_hidden`, see architecture/find.md); `&platform=<slug>` scopes recall and the keyword fallback (ranked among that shelf's rows, catalog-wide idf) and a bare provider name to that shelf (unknown slug is 404); rate limited per IP, 503 without a judge key |
   | `GET /catalog/providers/{service}` | Every tool one provider serves, by platform; a tool whose capability several providers serve on its platform carries `compare` (capability, URL key, provider count); reviewed endpoints carry `reviews`; unknown provider is 404 |
   | `GET /catalog/endpoints/{id}` | Endpoint, provider, capability siblings (each with `observed` and, where reviewed, `reviews`), call template, inline example and next-step hints; `observed_pending: true` when the observation cache had not read some of these endpoints yet (ask again shortly); `overflow_price_usd` / `overflow_price_unit` / `overflow_via` on the endpoint when the deployment can relay it |

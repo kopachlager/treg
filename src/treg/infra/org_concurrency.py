@@ -1,8 +1,8 @@
-"""Optional Redis admission for root call requests, independent of money admission/locks.
+"""Optional Redis rate/concurrency admission, independent of money admission/locks.
 
 A lease bounds abandoned occupancy; it cannot fence an already-running provider request.
 On renewal loss, keep accepted work and its financial cleanup alive and report the lost cap.
-The explicit fail-open/closed setting governs *new* admissions on Redis failure only.
+Published configuration supplies the limits; unavailable Redis allows new admissions.
 """
 from __future__ import annotations
 
@@ -13,21 +13,27 @@ import uuid
 
 import anyio
 
-from ..config import get_settings
-from . import kv
+from . import kv, org_flow_control as flow
 
 log = logging.getLogger("treg.org_concurrency")
+_LEASE_S = 30
+_RETRY_AFTER_S = 1
+_next_unavailable_log = 0.0
+_suppressed_unavailable_logs = 0
+_next_rate_log = 0.0
+_suppressed_rate_logs = 0
 
 
 class AdmissionRejected(Exception):
-    def __init__(self, *, unavailable: bool, retry_after_s: int) -> None:
-        self.status_code = 503 if unavailable else 429
+    def __init__(self, *, retry_after_s: int, version: int, rate_limited: bool = False) -> None:
+        self.status_code = 429
         self.retry_after_s = retry_after_s
         self.detail = {
-            "error": "org_concurrency_unavailable" if unavailable else "org_concurrency_limit",
-            "message": ("organization concurrency admission is unavailable" if unavailable else
+            "error": "org_rate_limit" if rate_limited else "org_concurrency_limit",
+            "message": ("organization request rate limit reached" if rate_limited else
                         "organization concurrent request limit reached"),
             "retry_after_s": retry_after_s,
+            "config_version": version,
         }
         super().__init__(self.detail["error"])
 
@@ -115,28 +121,53 @@ class Slot:
         await _join_cleanup(self._finish_task)
 
 
-def _unavailable(settings) -> None:
-    log.warning("org_concurrency acquire_unavailable policy=%s", settings.org_concurrency_redis_failure)
-    if settings.org_concurrency_redis_failure != "fail_open":
-        raise AdmissionRejected(unavailable=True, retry_after_s=settings.org_concurrency_retry_after_s)
+def _unavailable(org_id: int, version: int) -> None:
+    global _next_unavailable_log, _suppressed_unavailable_logs
+    now = time.monotonic()
+    if now < _next_unavailable_log:
+        _suppressed_unavailable_logs += 1
+        return
+    try:
+        log.warning("org_concurrency acquire_unavailable org_id=%s config_version=%s "
+                    "action=allow suppressed_since_last_log=%s", org_id, version,
+                    _suppressed_unavailable_logs)
+    except Exception:
+        pass  # Logging cannot turn the availability policy into a refusal.
+    _suppressed_unavailable_logs = 0
+    _next_unavailable_log = now + 5
 
 
-async def acquire(org_id: int) -> Slot | None:
-    settings = get_settings()
-    limit = settings.org_concurrency_limits.get(org_id)
-    if (not settings.org_concurrency_enabled or limit is None
-            or org_id in settings.org_concurrency_exempt_org_ids):
+def _rate_rejected(org_id: int, version: int, rate: flow.RateLimit, retry_after_s: int) -> None:
+    global _next_rate_log, _suppressed_rate_logs
+    now = time.monotonic()
+    if now < _next_rate_log:
+        _suppressed_rate_logs += 1
+        return
+    flow._emit("org_flow_control_rate_limited", org_id, None, level=logging.WARNING,
+               status=429, config_version=version, rps=rate.rps, burst=rate.burst,
+               retry_after_s=retry_after_s, suppressed_since_last_log=_suppressed_rate_logs)
+    _suppressed_rate_logs = 0
+    _next_rate_log = now + 5
+
+
+async def acquire(org_id: int, *, limit: int | None, version: int = 0,
+                  rate_limit: flow.RateLimit | None = None) -> Slot | None:
+    if limit is None and rate_limit is None:
         return None
     try:
         store = kv.store()
     except Exception:
         # URL options/client initialization can fail before a command exists to return unavailable.
-        return _unavailable(settings)
-    slot = Slot(store, org_id, settings.org_concurrency_lease_s)
-    attempt = asyncio.create_task(slot.store.acquire_slot(slot.key, slot.token, slot.ttl_ms, limit))
+        return _unavailable(org_id, version)
+    slot = Slot(store, org_id, _LEASE_S)
+    attempt = asyncio.create_task(
+        store.admit_org(org_id, slot.token, slot.ttl_ms, limit,
+                        rps=rate_limit.rps, burst=rate_limit.burst)
+        if rate_limit is not None else
+        store.acquire_slot(slot.key, slot.token, slot.ttl_ms, limit))
     try:
         # Cancelling the caller must not race a Redis write and leave its owner unaccounted for.
-        outcome = await asyncio.shield(attempt)
+        result = await asyncio.shield(attempt)
     except asyncio.CancelledError:
         async def cleanup():
             try:
@@ -145,15 +176,23 @@ async def acquire(org_id: int) -> Slot | None:
                 await slot._release()
         await _join_cleanup(asyncio.create_task(cleanup()))
         raise
+    outcome = result.outcome if rate_limit is not None else result
     if outcome == "acquired" and time.monotonic() < slot.deadline:
+        if limit is None:
+            return None  # Rate admission has no renewable owner and is never refunded.
         slot.renewal = asyncio.create_task(slot._renew())
         return slot
+    if outcome == "rate_limited":
+        _rate_rejected(org_id, version, rate_limit, result.retry_after_s)
+        raise AdmissionRejected(retry_after_s=result.retry_after_s, version=version,
+                                rate_limited=True)
     if outcome == "busy":
         try:
-            log.warning("org_concurrency rejected org_id=%s limit=%s status=429", org_id, limit)
+            log.warning("org_concurrency rejected org_id=%s limit=%s status=429 config_version=%s",
+                        org_id, limit, version)
         except Exception:
             pass  # Observability must not replace the original refusal.
-        raise AdmissionRejected(unavailable=False, retry_after_s=settings.org_concurrency_retry_after_s)
+        raise AdmissionRejected(retry_after_s=_RETRY_AFTER_S, version=version)
     # Includes an acquire reply received after the confirmed lease's conservative deadline.
     await slot.finish()  # A lost reply may have acquired: clean only this unique token.
-    return _unavailable(settings)
+    return _unavailable(org_id, version)

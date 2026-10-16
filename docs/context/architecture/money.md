@@ -343,15 +343,26 @@ their existing database behavior.
 `require_balance_orgs` refuses an empty, missing, or non-positive org before checkout on every
 application session that will touch a balance row. `admit` does the same for operations `reserve`
 and `release`, and does not yield into the body. That refusal is not a fallback and not an HTTP
-429. Wait timeouts and key-value failures still enter the original database path for every
-operation, including `reserve` and `release`.
+429. For `reserve` only, expiry of the configured acquisition budget releases partial local
+locks and token-owned Redis leases, then raises `ReserveAdmissionTimeout` without entering the
+session. `application.call.reserve.reserve_admission` maps it to `ReservationFailed` with kind
+`money_admission_timeout`, blame `treg`, and HTTP 429. `Retry-After` is a random integer between
+`money_admission_retry_after_s` and twice that setting (inclusive), spreading retries. The retry
+floor defaults to 1 second and accepts integers from 1 to 60. Its environment name is
+`TREG_MONEY_ADMISSION_RETRY_AFTER_S`; the legacy `TREG_ORG_CONCURRENCY_RETRY_AFTER_S` remains a
+validation alias for money only. It no longer configures Org concurrency admission. Both
+platform and Hub seller-price reserves use that mapping; no hold or upstream call starts on
+rejection. HTTP
+retains `X-Treg-Error: 1`; both MCP surfaces expose the status, body and `retry_after` metadata.
 
 The feature defaults off; `money_admission_org_ids` selects an opt-in subset, or all orgs when
 empty and enabled. Non-selected operations supply the disabled timing baseline. Admission never
 replaces Hold claims, CreditBlock locks or transaction atomicity. For `close`, `deferred`, `async`,
 and `hub`, a missing identity, unavailable Redis, or expired acquisition budget releases any
-partially acquired gates and executes the original database path. `reserve` and `release` share the
-Redis and wait-budget fallback, but a missing identity refuses instead of executing that path.
+partially acquired gates and executes the original database path. `release` keeps that wait-budget
+fallback so financial cleanup still runs. Every operation, including `reserve`, retains fallback
+on Redis infrastructure errors, an unconfigured store or lease loss. A store-raised timeout is
+an infrastructure error, distinguished from expiry of the gate's own acquisition budget.
 Lost renewal does not cancel or restart a money transaction already in
 progress. These fallback paths preserve database correctness but give up admission isolation; they are
 counted separately and are not a successful rollout. Owner-checked renewal and deletion prevent an old lease holder from extending
@@ -430,7 +441,10 @@ validated ceiling. Both the normal response path and the async worker
 use it. Provider differences remain in catalog YAML; there are no provider billing adapters.
 An async row settles at the terminal answer when its price is a table, a `usage` meter, or a plain
 `per_call` price (`observed` amount, the fixed price as fallback): a provider that bills every
-finished answer is charged for each one, a finished answer with no result included. Async
+finished answer is charged for each one, a finished answer with no result included. A provider
+that bills on submission has the reported charge frozen into the basis
+(`submission_charge_micro`), and an `observed` settle uses it when the terminal answer reports
+none, `billed_failure` included: the task bills what the provider charged, not the estimate. Async
 `per_success` rows without a table keep settling on the submission response.
 
 A submission whose own status is already a success word, on a descriptor with
@@ -500,7 +514,8 @@ owned by the original task and may close on this poll's terminal evidence. This 
 billed OAuth, or a zero estimate on a paid endpoint.
 A 2xx that is not an accepted submission (not JSON, fails the endpoint's `expect` rule, or carries
 no task id / an off-allow-list poll URL: `application.call.service._submission_rejected`) never
-becomes a row: it settles at zero on the request path and the caller sees the body and `$0`. The
+becomes a row: it settles on the request path at the charge the provider reported, else zero (a
+batch whose first task was refused may still carry accepted, billed tasks the caller owns). The
 worker never lets one row abort a tick (`_process` catches everything, `settle_due` gathers with
 `return_exceptions`), because an unset platform key for one provider must not stall every other
 provider's settlements. Each tick loads the catalog once, in a thread, before any poll starts
@@ -586,12 +601,58 @@ review and accepted deliberately (2026-08-17): coupling the credit's fate to the
 would be backwards, because the credit must stand whatever happens after it; full reasoning and the
 cheap future fix in [ads-conversions](ads-conversions.md).
 
-**Invoices exist on the manual path only.** The top-up Checkout sets `invoice_creation`, so a
-one-off purchase produces a real Stripe Invoice - number, PDF, billing address, tax ID - which is the
-document a finance team accepts; Stripe's card receipt is not. Auto-top-up charges a bare off-session
-PaymentIntent and therefore has **no** invoice, only a receipt: attaching one would mean rebuilding
-the automatic charge as InvoiceItem + Invoice paid off-session, rewriting the money path and its
-idempotency guarantees for the minority of payments. Say "invoice" only about the manual path.
+**Every future top-up has an invoice.** The manual top-up Checkout sets `invoice_creation`. For an
+automatic top-up, `attempt_auto_topup` creates a USD draft invoice for the existing Stripe Customer,
+adds one item, finalizes it with `auto_advance=false`, then pays it off-session using the saved card.
+Pending items and inherited discounts are excluded so the invoice charges the configured refill
+amount rather than another purchase or coupon amount.
+The invoice carries the same description and org/kind metadata as the manual invoice. Each write has
+a separate deterministic idempotency key derived from the credited-purchase count and invoice
+generation. The key does not change at midnight or after an uncertain Stripe response. The attempt
+key, base key, and generation are invoice metadata; the item also carries the attempt key. Before a
+new charge, `attempt_auto_topup` pages through the customer's invoices created since one day before
+the last credited automatic top-up to recover a draft, open, or paid attempt. If prior generations
+are all void, it starts the next generation. An unfinished automatic invoice for the same org with
+an older base key blocks a new charge while its payment may still settle. A prior open invoice whose
+PaymentIntent has failed or been canceled is voided before a new charge. A prior payment requiring
+authentication is also voided when the saved card has changed; Stripe cancels its PaymentIntent
+with the invoice. A processing or otherwise uncertain payment still blocks. For a paid invoice created after the last automatic credit,
+the PaymentIntent is checked against the ledger; one without a credit also blocks. A manual top-up,
+changed card, or changed refill amount must
+not hide a payment that may still settle or whose reply was lost. The unknown-outcome warning and
+failure limit apply until that older invoice is resolved. This still works
+when a user re-enables auto-top-up and resets the local failure counter. An incomplete or failed
+lookup leaves the attempt unresolved and counts toward the consecutive-failure limit without
+changing the invoice key. Each unknown outcome is logged as an error. At the limit, auto top-up is
+paused with a specific billing banner and email asking the customer to check billing history and
+contact support. A later manual top-up does not advance the invoice lookup boundary. Before any
+credited automatic top-up, the lookup checks the full customer invoice history.
+The cooldown, cap, ledger crossing, last automatic credit, and billing email are read before the
+Stripe sequence; `attempt_auto_topup` then releases the database transaction and retains only the
+needed scalar values. Stripe list, create, finalize, and pay calls do not hold a database connection.
+An open invoice with an associated PaymentIntent is not paid again while that payment may still
+settle. Finalization itself creates a `requires_confirmation` PaymentIntent, which is safe to pay
+with the attempt's existing idempotency key. A `processing` payment stays open and unresolved. This recovery
+uses invoice listing rather than Stripe's delayed search index, and needs no
+additional database table. The paid invoice's
+`payments` association identifies the PaymentIntent; `ledger.topup` still keys its purchased block on
+that ID. Historical bare auto-top-up charges remain without invoices.
+
+An invoice-created PaymentIntent does not inherit invoice metadata. A metadata-free payment webhook
+checks the PaymentIntent's customer against local orgs before `_invoice_metadata_for_payment`
+resolves the invoice through `InvoicePayment.list`; unrelated customers need no Stripe lookup. A
+webhook that arrives before the synchronous credit can still identify the org. The ledger's
+PaymentIntent uniqueness makes the later path a no-op. Confirmed failed finalized invoices are voided
+where possible; an uncertain payment result leaves its invoice intact for a later lookup.
+`auto_advance=false` prevents Stripe's automatic retries and dunning. An
+authentication-required invoice is voided only after Stripe confirms its PaymentIntent has failed
+or requires action and confirms the void. Auto top-up switches off, and the dashboard and treg email
+direct the customer to make a manual Checkout top-up with the bank verification. A successful
+manual payment re-arms a previously consented policy paused for authentication; simply saving a
+card or redelivering a payment webhook does not. If the void cannot be confirmed, auto top-up
+pauses as `stripe_unconfirmed` and asks the customer to contact support. A delayed failed-payment
+webhook for an already-void invoice cannot disable a policy that was re-armed after a manual
+payment. The invoice is a document; `invoice.created` and `invoice.paid` still do not credit balance.
 
 The address on that invoice comes from `billing_address_collection="required"` **plus**
 `customer_update={"address": "auto", "name": "auto"}` on the same session. Both are needed: the first
@@ -639,25 +700,28 @@ SetupIntent in that flow: `_set_default_pm` - called by both `_on_checkout_compl
 `_on_setup_succeeded` (and `_on_payment_succeeded`) - runs `_arm_if_waiting_for_card`. It turns
 the policy back on from `no_card` once a card exists, and from repeated declines
 (`max_attempts:*`) only when the card is proven: it just paid (`paid=True`, both payment webhooks)
-or it is a newly saved card. The declined card saved again is not proof. 3DS
-(`authentication_required`) and a deliberate off (reason `None`, consent still on file) stay off;
-a redelivered payment webhook must not switch a deliberately disabled policy back on.
+or it is a newly saved card. The declined card saved again is not proof. A successful manual payment
+also re-arms a policy paused for 3DS (`authentication_required`). A deliberate off (reason `None`,
+consent still on file) stays off; a redelivered payment webhook must not switch a deliberately
+disabled policy back on.
 
-Turning `invoice_creation` on makes Stripe emit `invoice.created` / `invoice.paid` for every top-up.
+Creating an invoice makes Stripe emit `invoice.created` / `invoice.paid` for every top-up.
 `handle_webhook_event` drops them, deliberately: crediting on an invoice event as well as on the
 PaymentIntent would be a second door onto the same money. The invoice is a document; the
-PaymentIntent is the payment. Note also that `invoice_creation` on one-time Checkout is **priced
-separately** by Stripe, and invoice emails only go out with Customer emails → Successful payments
-enabled in the dashboard.
+PaymentIntent is the payment. Note also that invoice creation can be **priced separately** by Stripe,
+and Stripe invoice emails depend on Customer emails → Successful payments being enabled in the
+dashboard. treg's own receipt email is sent independently.
 
 **`list_payments` reads rows from us and documents from Stripe.** The payment list is built from our
 own `CreditBlock` rows - the same table the balance is computed from, so the history can never show a
 payment the balance disagrees with, and amounts and dates need no network call. Stripe is asked only
-for the links, in two list calls (`Charge.list` + `Invoice.list`, joined in memory) rather than two
+for the links, in two list calls (`Charge.list` + `Invoice.list`, joined through invoice payments or
+the legacy charge invoice field) rather than two
 per row; a failure degrades to rows without links and reports `stripe_ok: false`, because a Stripe
 hiccup should cost the payer a download button, not their payment history. Both Stripe windows cap at
 100 payments, so a very old top-up on a busy account comes back link-less - the portal is the
-unbounded archive.
+unbounded archive. The dashboard marks these credited payments Paid and shows separate invoice and
+Stripe receipt links when each exists; the invoice PDF can still show the amount originally due.
 
 **`create_portal_session` is the self-serve surface** for card, billing address, tax ID and the full
 invoice archive: hosted, because every one of those is a form we would otherwise own and the tax-ID
@@ -962,6 +1026,13 @@ still pay the provider twice.
   original reservation there.
 - Refusal and cancellation cleanup return an acquired label. Expired entries are swept lazily,
   scoped to the caller, at claim time.
+
+A reserve admission 429 never reaches `_store_idempotent`; the HTTP exception handler's
+`_stamp_call_exit` releases its pending claim, including calls from either MCP surface. The same
+key can then acquire admission and run; only its subsequent success is replayed. Cleanup still
+needs the database and retries a pool timeout once. If both attempts fail, the row remains pending
+(409 on retry), then the existing stale-claim resolver stores 410 `idempotency_outcome_unknown`
+when no money evidence exists. That is a cleanup failure, not a cached admission 429.
 
 This protects retries that opt in. Ordinary non-billable failures already release their hold;
 a retry without a label after a paid success remains a new charge.

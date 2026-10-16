@@ -1,4 +1,4 @@
-"""Best-effort, process-local root-call logs. No request data or external I/O.
+"""Best-effort, process-local root-call logs. No request content or external I/O.
 
 Arrivals belong to their start window; statuses/latencies to their completion window.
 See docs/context/architecture/org-traffic.md for boundaries and bounded-loss semantics.
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import os
 import time
@@ -18,18 +17,15 @@ from functools import wraps
 from heapq import nlargest
 
 from ..call_surface import split_call_path
+from .structured_logging import get_logger
 
 WINDOW_S = 60
 MAX_ORGS = 4096
 # Upper bounds 1, 2, ... 2**31 milliseconds, then an overflow bucket.
 BUCKETS = 33
-log = logging.getLogger("treg.org_traffic")
-log.setLevel(logging.INFO)
-# MCP configures the root logger with RichHandler, which wraps JSON at console width. Keep
-# these machine-readable records on one physical line without changing any other logger.
-if not log.handlers:
-    log.addHandler(logging.StreamHandler())
-log.propagate = False
+_HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
+                           "OPTIONS", "TRACE", "PATCH"})
+log = get_logger("treg.org_traffic")
 _adapter: ContextVar[dict | None] = ContextVar("org_traffic_adapter", default=None)
 
 
@@ -151,15 +147,30 @@ def stop_reporting() -> None:
         _timer = None
 
 
-def identify(scope: dict, org_id: int, *, enter: bool = False) -> None:
-    """Called only with trusted Caller.org_id. Never derive identity from a header or URL."""
+def identify(scope: dict, org_id: int, *, enter: bool = False,
+             api_key_id: int | None = None) -> None:
+    """Called only with trusted Caller IDs. Never derive identity from a header or URL."""
     try:
         observation = scope.get("state", {}).get("org_traffic")
         if observation is not None:
             observation.org_id = org_id
+            observation.api_key_id = api_key_id
             if enter and observation.started is None:
                 observation.started = time.perf_counter()
                 observation.tracked = observation.counters.begin(org_id)
+    except Exception:
+        pass
+
+
+def describe(scope: dict, *, tool_name: str | None, endpoint_id: str | None,
+             replay_of: str | None) -> None:
+    """Copy already-resolved application metadata without inspecting request bytes or ORM objects."""
+    try:
+        observation = scope.get("state", {}).get("org_traffic")
+        if observation is not None:
+            observation.tool_name = tool_name
+            observation.endpoint_id = endpoint_id
+            observation.replay_of = replay_of
     except Exception:
         pass
 
@@ -169,11 +180,17 @@ class Observation:
     surface: str
     adapter: str | None = None
     org_id: int | None = None
+    api_key_id: int | None = None
     started: float | None = None
     tracked: bool | None = None
     counters: Counters = field(default_factory=lambda: counters)
+    method: str | None = None
+    tool_name: str | None = None
+    endpoint_id: str | None = None
+    replay_of: str | None = None
 
-    def finish(self, status: int | None, outcome: str) -> None:
+    def finish(self, status: int | None, outcome: str, *, call_ref: str | None = None,
+               failure_kind: str | None = None) -> None:
         elapsed = (time.perf_counter() - self.started) * 1000 if self.started is not None else None
         try:
             if self.tracked is not None:
@@ -182,7 +199,11 @@ class Observation:
         except Exception:
             pass
         _emit("request", {"surface": self.surface, "adapter": self.adapter,
-                          "org_id": self.org_id, "status": status, "outcome": outcome,
+                          "org_id": self.org_id, "api_key_id": self.api_key_id,
+                          "call_ref": call_ref, "status": status, "outcome": outcome,
+                          "failure_kind": failure_kind,
+                          "method": self.method, "tool_name": self.tool_name,
+                          "endpoint_id": self.endpoint_id, "replay_of": self.replay_of,
                           "handler_ms": round(elapsed, 3) if elapsed is not None else None})
 
 
@@ -203,8 +224,10 @@ class RequestLogMiddleware:
                 observation = None  # A nested wrapper on the same root cannot count it twice.
             else:
                 adapter = _adapter.get()
+                method = scope.get("method")
                 observation = Observation(call_path[0] if call_path else "mcp_transport",
-                                          adapter["name"] if adapter else None)
+                                          adapter["name"] if adapter else None,
+                                          method=method if method in _HTTP_METHODS else None)
                 state["org_traffic"] = observation
                 if adapter is not None and call_path is not None:
                     adapter["forwarded"] = True
@@ -235,7 +258,8 @@ class RequestLogMiddleware:
                 # Successful MCP envelopes are not another call. An eager auth challenge has no
                 # adapter/root invocation, but still needs an explicitly unresolved identity.
                 if not mcp_transport or status == 401:
-                    observation.finish(status, outcome)
+                    observation.finish(status, outcome, call_ref=state.get("call_ref"),
+                                       failure_kind=state.get("call_failure_kind"))
             except Exception:
                 pass
 
@@ -260,6 +284,9 @@ def mcp_adapter(name: str):
                 _adapter.reset(token)
                 if not marker["forwarded"]:
                     _emit("request", {"surface": "mcp", "adapter": name, "org_id": None,
+                                      "api_key_id": None, "call_ref": None,
+                                      "method": None, "tool_name": None, "endpoint_id": None,
+                                      "replay_of": None,
                                       "status": None, "outcome": outcome, "handler_ms": None})
         return observed
     return decorate

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -19,6 +20,7 @@ from treg.application.call import overflow as call_overflow
 from treg.application.call import resolve as call_resolve
 from treg.application.call import route as call_route
 from treg.application.call import service as call_service
+from treg.application import catalog_stats
 from treg.application.call.types import ResolutionFailed, UpstreamResponse
 from treg.config import get_settings
 from treg.infra.db import session_maker
@@ -28,6 +30,7 @@ from treg.domain.catalog.routing.contracts import canonical_identity
 from treg.domain.catalog.routing.plan import Candidate, cost_at, rank
 from treg.infra.catalog_observations import CachedEndpointObservationReader
 from treg.models import CallRecord, Hold, LedgerEntry, OverflowRoute
+from treg.timeutil import utcnow_naive
 
 from test_marketplace_call import _balance, firecrawl_platform_on, platform_on  # noqa: F401
 
@@ -408,6 +411,7 @@ async def test_routed_plan_keeps_per_success_hit_fallback_from_the_cache(
             ))
         await db.commit()
     monkeypatch.setattr(stats, "MIN_HIT_SAMPLES", 3)
+    assert (await catalog_stats.refresh(session_maker, now=utcnow_naive() + timedelta(minutes=2)))["caught_up"]
     reader = A.app.state.endpoint_observation_reader
     assert await reader.get_many([endpoint_id]) == {}
     await reader.wait_for_idle()
@@ -952,6 +956,7 @@ async def test_hit_verdict_is_recorded_and_becomes_a_hit_rate(clients: AsyncClie
     # refreshes in the background, so warm it the way test_endpoint_stats does
     from treg import api as A
     monkeypatch.setattr(call_route, "_endpoint_observation_reader", A.app.state.endpoint_observation_reader)
+    assert (await catalog_stats.refresh(session_maker, now=utcnow_naive() + timedelta(minutes=2)))["caught_up"]
     await clients.get(f"/catalog/endpoints/{ROUTED}")
     await A.app.state.endpoint_observation_reader.wait_for_idle()
     r = await clients.get(f"/catalog/endpoints/{ROUTED}")
@@ -1959,3 +1964,64 @@ async def test_when_crawl4ai_fails_linkup_answers_with_the_same_schema(clients, 
     assert r.status_code == 200, r.text
     assert [s[0] for s in seen] == ["crawl4ai", "linkup"] and r.json()["_treg"]["provider"] == "linkup"
     assert seen[1][3]["schema"] == _SCHEMA and seen[1][3]["mode"] == "standard"
+
+
+def test_every_iso_country_reaches_dataforseo_as_its_own_location():
+    """`country` on a routed SEO capability once reached DataForSEO as the United States for every
+    country outside a short hand-written table: a Thai or Russian volume question was answered with
+    US volumes and billed as a hit, and nothing in the answer said so. DataForSEO's country codes
+    are Google Ads geo target ids (2000 + the ISO 3166-1 numeric code), so the whole ISO table maps."""
+    cat = catalog_store.load()
+    contract = cat.contracts["google.keywords.volume"]
+    dfs = cat.adapters["dataforseo.google.keywords.volume"]
+    anchors = {"us": 2840, "uk": 2826, "th": 2764}
+    for code, location in anchors.items():
+        ident, _ = canonical_identity(contract, {"keywords": ["kahve"], "country": code.upper()})
+        _, body = dfs.to_upstream(ident)
+        assert body[0]["location_code"] == location, (code, body)
+    countries = json.loads((catalog_store.CATALOG_DIR / "countries.json").read_text())
+    assert all(P.dfs_location(c) for c in countries), "every country treg knows has a DataForSEO location"
+    assert P.dfs_location("Thailand") == 2764, "a country name is the same country"
+
+
+def test_a_country_dataforseo_cannot_be_asked_about_is_reported_not_answered_for_the_us():
+    """A value that names no country must not quietly become the United States: the location is
+    left out and the filter is reported as ignored, the same way a provider with no geo field is."""
+    from treg.domain.catalog.routing.plan import ignored_filters
+    cat = catalog_store.load()
+    contract = cat.contracts["google.serp.organic"]
+    dfs = cat.adapters["dataforseo.google.serp.organic"]
+    ident, _ = canonical_identity(contract, {"q": "coffee", "country": "xx"})
+    assert P.dfs_location("xx") is None
+    assert "location_code" not in dfs.to_upstream(ident)[1][0]
+    assert ignored_filters(dfs, contract, ident) == ("country",)
+    good, _ = canonical_identity(contract, {"q": "coffee", "country": "th"})
+    assert ignored_filters(dfs, contract, good) == ()
+
+
+def test_a_contract_default_the_caller_did_not_send_is_not_an_ignored_filter():
+    """`google.keywords.volume` defaults `language: en`. SE Ranking has no language field, so the
+    default alone ranked it behind a child fifty times its price on every call, while the catalog
+    quote (which ranks without the default) named SE Ranking first. Only a filter the caller sent
+    can make an answer looser than the question."""
+    from treg.domain.catalog.routing.plan import ignored_filters
+    cat = catalog_store.load()
+    contract = cat.contracts["google.keywords.volume"]
+    seranking = cat.adapters["seranking.google.keywords.volume"]
+    ident, _ = canonical_identity(contract, {"keywords": ["tea"]})
+    assert ident["language"] == "en", "the default still reaches the providers that take it"
+    assert ignored_filters(seranking, contract, ident, given={"keywords"}) == ()
+    sent, _ = canonical_identity(contract, {"keywords": ["tea"], "language": "de"})
+    assert ignored_filters(seranking, contract, sent, given={"keywords", "language"}) == ("language",)
+
+    def cand(eid, price, ignored):
+        return Candidate(endpoint={"id": eid, "provider": eid.split(".")[0], "cost": {"type": "per_call"}},
+                         adapter=None, variant=("keywords",), tier="platform", price_micro=price, hit_rate=None,
+                         ok_rate=None, p50_ms=None, last_ok_days=None, ignored=ignored)
+    plan = [cand("seranking.google.keywords.volume", 1_790,
+                 ignored_filters(seranking, contract, ident, given={"keywords"})),
+            cand("dataforseo.google.keywords.volume", 90_000,
+                 ignored_filters(cat.adapters["dataforseo.google.keywords.volume"], contract, ident, given={"keywords"}))]
+    quote = [cand(c.endpoint["id"], c.price_micro, ()) for c in plan]
+    assert [c.endpoint["id"] for c in rank(plan, given={"keywords"})] == \
+        [c.endpoint["id"] for c in rank(quote)] == ["seranking.google.keywords.volume", "dataforseo.google.keywords.volume"]
