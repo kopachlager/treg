@@ -169,6 +169,7 @@ sources:
   - src/treg/domain/money/settlement.py
   - src/treg/domain/catalog/stats.py
   - src/treg/infra/catalog_observations.py
+  - src/treg/infra/catalog_stat_dirty.py
   - src/treg/application/catalog_stats.py
   - src/treg/alembic/versions/0038_endpoint_day_stats.py
   - src/treg/alembic/versions/0066_endpointdaystat_verdicts.py
@@ -638,6 +639,9 @@ the provider's `source.curated` day.
 - **Ingest.** `carry_verification` carries `added` by id from every catalog file BEFORE its
   method/path check: a tool whose route moved is still the tool that reached main that day. Only
   an id the catalog has never had gets today's UTC date, so a re-import never re-dates a tool.
+  For a row whose route still matches it also carries the reviewed facts no spec holds (`cost`,
+  `observed_cost`, `expect`, `untestable`, `status`), but not `platform_blocked` once the fresh row
+  declares `resource_ownership.requires`: declared ownership is what the block stood in for.
 - **Backfill.** `scripts/catalog_backfill_added.py` dated the existing rows once from the
   first-parent history of main: the first merge day on which each id was present in any catalog
   file. A branch that merged main into itself and was then fast-forwarded onto main puts its own
@@ -818,7 +822,13 @@ required id but omit this metadata, so new legacy-style pairs cannot rely on a r
 boundary by hand.
 Generated legacy task consumers for which no trustworthy producer→id chain is represented are
 explicitly `platform_blocked` instead: Akta request status, TikHub's captions-result route, and the
-DataForSEO on-page/SERP task consumers remain callable with BYOK but never receive treg's shared key.
+DataForSEO SERP task consumers (`serp/ai_summary`, `serp/screenshot`) remain callable with BYOK but
+never receive treg's shared key.
+
+A provider's task queue is ingested as owned async pairs (`catalog_ingest.dfs_submission`): the
+submission's `produces` may take every list item (`tasks.*.id`), so a batch owns each of its tasks,
+and its free reader declares the matching `requires`. A reader of the account-wide queue is never
+the poll target. Every shared-key submission must have an owned reader (`tests/test_dataforseo_async.py`).
 `carry_verification` preserves that reviewed block across re-ingestion just like a verification
 stamp; silently regenerating it away would reopen the tenant boundary.
 
@@ -1661,9 +1671,8 @@ a name, and fail. Routing would also have been the first feature to break the fo
 relays rather than models.
 
 What treg owes instead is the half only treg can supply, because only treg sees every call from every
-tenant: `endpoint_stats.observed()` aggregates **success rate, p50/p95 latency, last-answered and
-sample size** per endpoint from `CallRecord` — which has recorded `endpoint_id`, `status_code` and
-`duration_ms` since the marketplace shipped and was never read. It rides on
+tenant: the observation reader publishes **success rate, p50/p95 latency, last-answered and
+sample size** per endpoint from folded `CallRecord` evidence. It rides on
 `/catalog/endpoints/{id}`, attached to the endpoint **and every sibling**, because the choice is made
 on that page and an agent will not make a second round-trip to compare reliability.
 
@@ -1687,13 +1696,17 @@ acceptable entry exists.
 
 Refresh is process-level singleflight. Concurrent misses join one shared Task, duplicate endpoint ids
 already in flight are not queued again, and the Task batches the requested ids. Its
-`PostgresEndpointObservationReader` opens an independent session only around one small read and
-closes it as soon as that finishes. HTTP `/catalog/search`, both MCP catalog-search tools,
+`PostgresEndpointObservationReader` opens an independent session for bounded summary reads and
+closes it as soon as that finishes. On PostgreSQL, a short read-only repeatable-read transaction
+keeps the cursor, day buckets and overdue corrections in one snapshot, so a concurrent repair
+cannot make old bucket contents appear trustworthy by deleting their marker between reads.
+HTTP `/catalog/search`, both MCP catalog-search tools,
 routed planning in `application.call.route.build_plan`, and the prose pages that print observed stats
 (`/use-cases/*`, `/workflows` and `/workflows/*`) receive the same reader instance from bootstrap, so
 their request paths have no observation DB dependency, check out zero connections, and join the same
 refresh Task. A refresh failure keeps stale
-entries, backs off before retry, and never changes the Catalog response status; a failure with no
+entries without renewing their age, backs off for at least sixty seconds before retry, and never
+changes the Catalog response status; a failure with no
 cached entry is honest emptiness. The adapter exposes entry-level `fresh`, `stale`, and `miss`
 counters plus `refresh` and `refresh_failure` counts. Its invalidation story is the two TTLs: deploys
 and process restarts begin cold, and no cross-instance correctness depends on the cache.
@@ -1701,8 +1714,7 @@ and process restarts begin cold, and no cross-instance correctness depends on th
 **The evidence is folded once, off the request path** (`application/catalog_stats.py`, run by the
 `treg-worker catalog stats` cron). Refreshing straight from `callrecord` meant every web process
 re-aggregating thirty days of audit rows for an endpoint and its siblings whenever its cache
-expired, and again from cold after each deploy: on a large audit table that is tens of seconds per
-pass, each pass evicting the pages the money path needs. The worker instead
+expired, and again from cold after each deploy. The worker instead
 walks the audit table by primary key from a persisted cursor (`EndpointStatCursor`) and folds each
 row into one `EndpointDayStat` bucket per endpoint per UTC day: counts, the newest success, the
 `hit`/per-success tallies, the count of each verdict word (`verdicts`, a JSON object; NULL on a
@@ -1713,20 +1725,80 @@ not evidence and are not folded, exactly as the live query excludes them. An ent
 `observed_from: YYYY-MM-DD` when its provider replaced the service behind it: the folded reader
 (`PostgresEndpointObservationReader.get_many`) then drops that endpoint's day buckets before the
 date, so its published reliability describes only the current service. The YAML line carries the
-reason as a comment; the live fallback query does not apply it. The first run bisects the
+reason as a comment. The first run bisects the
 primary key to the first row inside the window rather than reading older pages, consumes at most
-`--max-rows` per run, and the reader keeps computing the live aggregate until a run reports it
-has caught up (`caught_up_at`), so a deployment that never schedules the worker behaves as before.
-The same fallback applies when the worker stops: a cursor not updated for `STALE_AFTER_S` (two
-hours) sends the reader back to the live aggregate with a warning, so a dead cron degrades to the
-old cost rather than to buckets that silently age out of the window. Each batch is one
+`--max-rows` per run, and the reader requires a recent `caught_up_at` and `updated_at`. Missing,
+incomplete or stale folds raise `EndpointObservationUnavailable`; no cache refresh falls back to
+`stats.observed` or scans `CallRecord`. A deployment without the worker publishes no observations.
+Each batch is one
 transaction under the cursor row's lock and re-reads every bucket it touches inside that lock;
 nothing about a bucket is carried between batches, so two overlapping runs (a slow backfill
 still going when the next schedule fires) serialize cleanly instead of one erasing the other's
 fold with the cursor already past the rows.
-Once caught up, endpoints without mutable terminal evidence read the sum of their day buckets,
-including async endpoints without result adapters. Async endpoints with adapters retain live reads
-so late terminal hits are visible. The folded observation covers buckets from the day of the
+Late terminal evidence uses a persistent correction queue, `EndpointStatDirty`, keyed by endpoint
+and original UTC submission day. `audit._write_batch` updates the actual matching `CallRecord`
+rows with `RETURNING`, then calls `catalog_stat_dirty.mark_dirty` in the same transaction. Repeated
+notifications increment one marker's revision; they do not create one job per call or reset its age.
+Task finalization and money's settle/release transaction remain unchanged. Audit is still
+best-effort analytics, not durable money evidence.
+
+After its append pass, the same worker replaces marked day buckets from source rows with
+`id <= cursor_id`. The cursor lock serializes replacement with append folding, preventing double
+counts. A replacement recomputes the entire `Tally`, including success classification, last success,
+hit/verdict counts and the bounded latency reservoir. It conditionally acknowledges only the marker
+revision it read; a correction arriving during the scan remains queued. After a successful full
+replacement, a retained newer revision's `queued_at` advances to the source scan's start, unless
+already newer. This is a conservative lower bound on the age of still-uncovered corrections,
+not the repair's completion time or the pass's earlier start. The replacement and age advance
+commit together without changing the revision or retry schedule. Continuous terminal writes
+therefore cannot make a regularly repaired bucket look abandoned; failures and rollbacks never
+renew its age. `catalog_stat_dirty` owns
+all marker writes; the worker owns transaction boundaries. Repairs read only one endpoint/day
+through the existing `(endpoint_id, created_at)` index and stream bounded batches without source-row
+locks. The source query keeps only `refused_by IS NULL`, excluding empty-string refusal values,
+before transport: these records never contribute to `Tally`. Filtering can reduce transferred rows
+but does not guarantee fewer heap reads or faster repairs when refusals are rare. An empty source
+still replaces the old bucket with a reconciled zero tally and acknowledges its marker.
+Each batch is unpacked locally, avoiding an async result transition per row, and yields to
+the event loop before the next batch. Batching preserves the complete source query and its single
+snapshot; it does not cap the day or reduce the database scan. Repairs have independent bucket-count,
+elapsed-time and per-bucket timeout budgets. A failed replacement
+rolls back, retains its marker and defers retry, allowing other buckets to progress. The elapsed-time
+budget covers the repair loop, not the append pass or queue maintenance.
+
+Revision `0074` adds `EndpointDayStat.terminal_reconciled`, initially false for existing rows.
+`catalog_stats._seed_corrections` queues legacy async/result-adapter buckets from the small summary
+table, without scanning audit history. New buckets are reconciled by construction; appending to a
+legacy bucket cannot mark it reconciled. Async endpoints with adapters are published only when all
+applicable day rows are reconciled and no correction is older than `STALE_AFTER_S`. Unavailable
+endpoints retain their cache entries only for their original TTL; other complete endpoints in the
+same refresh can still be published. Async endpoints without adapters use ordinary folds. Async
+hit rates always use terminal evidence, never an inference from whether credits were charged.
+The current UTC day has the same overdue check: a genuinely stalled repair must not remain
+publishable indefinitely. One untrustworthy applicable day suppresses that endpoint's whole
+observation; silently dropping the day would shorten its evidence window and bias rates and
+provider comparisons.
+
+**Explicit requeue closes an earlier writer overlap.** After retiring writers that could change
+terminal evidence without marking its original day, `catalog_stats.requeue_async_stats` previews
+existing async/result-adapter buckets inside the current UTC window. An explicit apply selects
+and records its current target list under the fold cursor lock, setting `terminal_reconciled=False`
+and marking the same keys dirty in one transaction. Counts, samples and timestamps stay intact;
+existing marker age and retry backoff are preserved. The ordinary cron processes the queue with its existing budgets.
+Append folding keeps False, so a later True proves that a full repair happened after the reset.
+This works even when that repair's pass began earlier; `updated_at` is not completion evidence.
+
+The applied JSON manifest records the exact target keys. `catalog_stats.repair_status` reads their
+flags and markers in one statement snapshot. Missing, unreconciled or still-dirty targets remain
+incomplete; targets outside the current window are reported as `aged_out`, not as repaired. A
+preview manifest is rejected as completion evidence. Status applies to the same database and an
+unaltered applied manifest; it does not establish that all writers have been upgraded or that a
+reader cutover is ready. Reapplying deliberately requeues the targets again. The explicit command
+does not run automatically or scan source audit rows. New terminal results can return an active
+day to `pending` after its initial repair. A true reconciliation flag proves that initial repair;
+the reader separately bounds how long further corrections may remain queued.
+
+The folded observation covers buckets from the day of the
 window's start onward (`stats.window_days`, at most one day more evidence than the live cut,
 never less), published through the same `stats.publish` floors the live path uses; the fold and
 the SQL are held equal by `tests/test_catalog_stats_refresh.py`. Merging days weights each
@@ -1763,6 +1835,9 @@ Five rules worth keeping:
   declaration), charging nothing and asking no one else. `endpoint_view` shows `status` and
   `means` on the tools that declare it. Each scrape adapter's `miss` predicate reads that
   provider's own text field, so an empty page is a miss for every provider, not a hit.
+- **A failed `expect` rule is a miss.** A routed child's 2xx whose body fails the endpoint's own
+  `expect` success rule is a `miss` whatever the adapter reads off it, and keeps the charge the
+  provider reported.
 - **`miss` semantics ride on the endpoint.** Some providers answer "asked and answered: no result"
   with an error status (PDL 404s a person it has no record of; Hunter's combined-find does the
   same). Endpoints with evidenced miss behaviour carry a `miss: {status, means}` block in their
@@ -1834,15 +1909,33 @@ Five rules worth keeping:
 
 ### Search scoring — most words must match, and the rare ones decide
 
-This is the shipped ranker: what `/catalog/search` and the CLI answer, the lexical page the
-discovery experiment measures against, and the page an agent's MCP search falls back to when the
-job-first answer abstains ([search-experiment](search-experiment.md)).
+This is the shipped ranker: what `/catalog/search` answers, the lexical page the discovery
+experiment measures against, and the page an agent's MCP search (and the CLI's, which asks
+`/catalog/search?engine=agent` for the same use case) falls back to when the job-first answer
+abstains ([search-experiment](search-experiment.md)).
 
 A query word matches only at the START of a word in a field (`store._needles`, haystacks stored
 word-padded by `_padded`): "search" matches "searches" but not "research", "ads" not "leads". A
 substring match tied a research-task status row with every search tool on "web search", and the
-evidence sort then put the free, always-200 status row first. CJK variants keep matching anywhere,
-since CJK text has no spaces between words.
+evidence sort then put the free, always-200 status row first. A query word that is a provider's
+one-word name shorter than four letters matches only whole, or with a plural "s"
+(`WHOLE_WORD_BELOW`): "exa" had matched "exact" in summaries and outranked every Exa row. Any other
+short word still matches a word's start, so "web" finds "website" and "geo" "geolocation". CJK
+variants keep matching anywhere, since CJK text has no spaces between words.
+
+**A provider named with a task** (`store.provider_focus`): "exa search", "people data labs company
+enrichment". A provider is named by its id or its display name as a token sequence, longest first;
+a domain is part of the name ("you.com"; "you" alone is a word); a platform's name names the
+platform, and a name of only short or function words names nothing.
+The rest of the query is searched without the name, so its words ("people") cannot pull the page to
+another job; the provider's rows need only one of the rest's words, match it by stem too
+("enrichment" meets "enrich"), and lead the page in their own relevance order, with no routed row
+(the caller chose the provider). Every other row is admitted and scored by the rest exactly as an
+ordinary search for it would be, so the page after the provider's rows is the rest's own page. The
+lead lives in the scores, so a led page shows no score and says `led_by`. Where none of the
+provider's rows matches a word of the rest, the query is searched as typed; this one decision
+(`provider_focus`, cached per catalog) is also the judged answer's. A bare name is an ordinary
+search.
 
 `catalog_store.search` demanded EVERY query token match (AND). Right for the 2–3 word refinement
 ("tiktok comments" must not return every tiktok endpoint), and fatal for how agents actually query:
@@ -1953,7 +2046,9 @@ and the CLI so the three surfaces cannot disagree:
   provider's NAME; the row an agent should see first for that job — `treg.people.search`, where
   treg chooses among every provider — contained no word of the query. `search` now adds
   `treg.<capability>` at the best child's score whenever a child matched. The token-filter tests
-  exempt these pulled-in rows: their own text need not contain the query.
+  exempt these pulled-in rows: their own text need not contain the query. A query that names the
+  provider with a task ("leadsforge email") asked for that provider: its rows lead and no routed
+  row rides in.
 - **Vocabulary before ranking.** The same query first ranked `people.email.find` above
   `people.search` because `find` is a token of the former's capability NAME (weight 3) and only of
   the latter's summary (weight 2). The fix was to say in `capabilities.yaml` what the job is —
@@ -2172,16 +2267,14 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   worker folds its counts into `EndpointDayStat.verdicts` (calls per word, e.g. `{"valid": 31,
   "catch_all": 4, "unknown": 2}`; `unknown` is a word like the others, never folded into a miss),
   but `stats.publish` does not show them yet: the observation an agent reads carries no verdict
-  counts until the word mappings are proven. Showing them means publishing them under the hit
-  floor and, like `hit`, reading async endpoints live, since an async word can land after the
-  fold cursor has passed its submission.
-  Async endpoints with result adapters read their `CallRecord` observations live: the daily fold
-  may consume a submission before its terminal poll changes the hit, and its one-way cursor cannot
-  revise it. Adapter presence selects that path even when verification is lost, preserving recorded
-  terminal evidence. Without an adapter, terminal classification never corrects `hit`, so the reader
-  uses the existing day buckets for all published observations. HTTP success and request latency
-  describe the submission, as on the live path; they do not claim to measure job completion.
-  `stats.observed` publishes `hit_rate`/`hit_samples` (floor 20) and, for synchronous
+  counts until the word mappings are proven. Publishing them later must retain the hit sample
+  floor and use corrected terminal evidence.
+  Async endpoints with result adapters read reconciled day buckets. A late terminal result marks
+  its original day dirty, and the worker replaces that bucket before acknowledging the marker.
+  Adapter presence requires reconciliation even when verification is lost. Without an adapter,
+  terminal classification never corrects `hit`, so ordinary day buckets suffice. HTTP success and
+  request latency describe the submission; they do not claim to measure job completion.
+  `stats.publish` publishes `hit_rate`/`hit_samples` (floor 20) and, for synchronous
   per-success endpoints, reads historical rows too (a 2xx with `cost_observed_micro == 0` is a miss).
   Async per-success endpoints use only the terminal verdict: a found result can cost zero credits.
   The plan, `catalog_get` and the CLI's HIT column read it; a registered tool (tier 1) or stored key
@@ -2208,6 +2301,10 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   still decides among candidates that ignore equally much. `limit` never counts: it is a page size,
   not a narrowing filter, and the contract defaults it, so counting it demoted every limit-less
   child (a free-on-miss role finder fell behind a search that bills its empty pages).
+  Only a filter the caller SENT counts (`ignored_filters(given=…)`): a contract default is not a
+  question anyone asked, and counting it made the call-time ranking disagree with the quote. A
+  filter sent through a one-argument transform with no value for it (an unmappable country) counts
+  as ignored, never becomes another value.
   **Coverage caveat**: of 16 `people.search` children, only icypeas maps geo today, so the rule
   currently floats one provider. lusha, crustdata, companyenrich and leadmagic all filter on
   location upstream — their adapters just do not map it. Until they do, the rule is doing more work
@@ -2264,11 +2361,13 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   bracket-safe target), crustdata/diffbot people.enrich (truncated examples), the `*.bulk` jobs
   (async), hunter multi-domain (masked rows).
 - **Filters reach providers, or say they did not (2026-08-29)**: `country` (ISO code) becomes a name
-  through `country_name` (`catalog/countries.json`, 249 rows generated from pycountry) for providers
+  through `country_name` (`catalog/countries.json`, generated from pycountry) for providers
   that filter on a location NAME (icypeas); `location` is a free-text pass-through ("London, United
   Kingdom", "Europe") for the same providers; a filter the caller sent that an adapter never mentions
   is listed on the attempt as `ignored_filters` — silently unapplied was the worst outcome (the bench
-  had post-filtered in the agent because of it). Bench re-run, recruiting 30: same icypeas rows as the
+  had post-filtered in the agent because of it). `dfs_location` maps any ISO country to its location
+  code (`catalog/country_numeric.json`) and returns nothing for a value that names no country: a
+  country must never silently become a default one. Bench re-run, recruiting 30: same icypeas rows as the
   hand-written policy, one automatic fall-through, region briefs rescued by the pass-through.
 - **Routed DISCOVERY is a runtime switch (2026-08-29)**: `TREG_ROUTED_DISCOVERY=off` (default `on`)
   stops search leading with `treg.<capability>` and stops a routed parent riding in when a child

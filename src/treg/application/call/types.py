@@ -39,6 +39,7 @@ _BLAME_BY_KIND: dict[str, Blame] = {
     "trial_allowance_unavailable": "treg",
     "trial_allowance_reached": "caller",
     "platform_cap_unavailable": "treg",
+    "money_admission_timeout": "treg",
     "catalog_price_invalid": "treg",
     "platform_daily_cap_reached": "caller",
     "tag_budget_unavailable": "treg",
@@ -87,12 +88,14 @@ class CallFailure(Exception):
         *,
         status_code: int,
         detail: str | dict,
+        retry_after_s: int | None = None,
     ) -> None:
         super().__init__(str(detail))
         self.kind = kind
         self.blame = _BLAME_BY_KIND[kind]
         self.status_code = status_code
         self.detail = detail
+        self.retry_after_s = retry_after_s
 
 
 class IntakeFailed(CallFailure):
@@ -271,6 +274,10 @@ class CallContext:
     # Set by a routed parent on each child: the child leaves its hold OPEN here instead of settling,
     # and the parent charges or releases every one at the end (route.py `_close_deferred`).
     deferred_settles: list | None = None
+    # Scalar snapshots for root request logs; never resolve a target just for telemetry.
+    tool_name: str | None = None
+    endpoint_id: str | None = None
+    replay_of: str | None = None
 
 
 @dataclass(frozen=True)

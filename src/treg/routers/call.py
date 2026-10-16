@@ -45,7 +45,7 @@ from ..domain.governance import publicdemo as publicdemo_policy
 from ..domain.governance import usage as usage_policy
 from ..domain.identity.access import Caller, require_member
 from ..infra.db import get_session
-from ..infra import org_concurrency, org_traffic
+from ..infra import org_concurrency, org_flow_control, org_traffic
 from ..models import Tool
 from .auth import _client_ip
 
@@ -154,7 +154,8 @@ async def _enforce_daily_cap(caller: Caller, db: AsyncSession) -> None:
 
 
 def _translate_call_failure(exc: CallFailure) -> HTTPException:
-    return HTTPException(status_code=exc.status_code, detail=exc.detail)
+    headers = {"Retry-After": str(exc.retry_after_s)} if exc.retry_after_s is not None else None
+    return HTTPException(status_code=exc.status_code, detail=exc.detail, headers=headers)
 
 
 def _parse_call_meta(request: Request, caller: Caller | None = None) -> CallMeta:
@@ -221,6 +222,7 @@ def _capture_exceptional_call(
         props["provider"] = urlsplit(target.upstream).hostname or ""
     org_id, email = getattr(request.state, "call_identity", (None, ""))
     team_slug = getattr(request.state, "call_team_slug", "")
+    request.state.call_failure_kind = props["failure_kind"]
     analytics.capture(
         email or "anonymous",
         "tool_called",
@@ -352,7 +354,8 @@ async def run_call_surface(rest: str, request: Request, caller: Caller, *, prefi
     rest)` runs inside the same try, so a fault there is audited and released like any other.
     `headers`, when given, replaces the request's raw headers for the upstream call (`/table/` asks
     the provider for uncompressed bytes); `/call/` never passes it."""
-    org_traffic.identify(request.scope, caller.org_id, enter=True)
+    org_traffic.identify(request.scope, caller.org_id, enter=True,
+                         api_key_id=caller.api_key.id if caller.api_key else None)
     # Identity for the refusal fallback in `_mark_treg_own_errors`: a raise anywhere below (unknown
     # tool, deny rule, daily cap) leaves this handler without an audit row, and the exception handler
     # is the one place every such refusal passes through — but it has no Caller of its own.
@@ -397,7 +400,11 @@ async def run_call_surface(rest: str, request: Request, caller: Caller, *, prefi
     streaming = False
     try:
         # Caller is trusted; every root HTTP/MCP call enters here, routing children do not.
-        slot = await org_concurrency.acquire(caller.org_id)
+        snapshot = await org_flow_control.check(caller.org_id, context.call_ref)
+        slot = await org_concurrency.acquire(
+            caller.org_id, limit=snapshot.max_in_flight if snapshot else None,
+            version=snapshot.version if snapshot else 0,
+            rate_limit=snapshot.rate_limit if snapshot else None)
         upstream = await execute_call(context, request.app.state.http)
         if slot is not None:
             upstream.close = org_concurrency.cleanup_once(upstream.close)
@@ -406,7 +413,7 @@ async def run_call_surface(rest: str, request: Request, caller: Caller, *, prefi
             response = _LeasedStreamingResponse(response, slot, upstream.close)
             streaming = True  # The ASGI response now owns cleanup and slot release.
         return response
-    except org_concurrency.AdmissionRejected as exc:
+    except (org_concurrency.AdmissionRejected, org_flow_control.PauseRejected) as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail,
                             headers={"Retry-After": str(exc.retry_after_s)}) from exc
     except CallFailure as exc:
@@ -429,6 +436,8 @@ async def run_call_surface(rest: str, request: Request, caller: Caller, *, prefi
         request.state.idem_claim = context.idempotency
         request.state.call_audited = context.audited
         request.state.call_cost_micro = context.cost_micro
+        org_traffic.describe(request.scope, tool_name=context.tool_name,
+                             endpoint_id=context.endpoint_id, replay_of=context.replay_of)
         if slot is not None and not streaming:
             await slot.finish(upstream.close if upstream is not None else None)
 
@@ -444,7 +453,8 @@ async def call_catalog_endpoint(
     caller: Caller = Depends(require_member),
 ):
     """Call one catalog endpoint through the same policy, billing, audit, and relay path as /call."""
-    org_traffic.identify(request.scope, caller.org_id)
+    org_traffic.identify(request.scope, caller.org_id,
+                         api_key_id=caller.api_key.id if caller.api_key else None)
     if not get_settings().claude_connector_enabled:
         raise HTTPException(status_code=404, detail="Claude catalog connector is not enabled")
     request.state.catalog_only = True

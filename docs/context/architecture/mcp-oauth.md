@@ -260,7 +260,17 @@ each of which was added because a real endpoint needed it:
 
 Optional, and it is the caller's. Pass the same key when repeating a call whose answer never arrived:
 treg replays the stored response, does not reach the provider, and charges nothing, with
-`replayed: true` on the result.
+`replayed: true` on the result. The key becomes an `Idempotency-Key` header, and a header value is
+ASCII: an ASCII key travels unchanged, a non-ASCII one percent-encoded as UTF-8 (a digest of the whole
+key when that outgrows the stored length), so the same key always maps to the same header
+(`_header_idempotency_key`).
+
+## Request-building tools refuse undeclared arguments
+
+The SDK's argument model ignores keys a tool does not declare. For `call`, `call_media`,
+`catalog_call_read` and `catalog_call_write` a dropped key is a wrong request (`data` instead of
+`body` sent an empty POST), so `_UnknownCallArguments`, a `tools/call` middleware on both surfaces,
+refuses it before anything is sent and names the accepted arguments. Advertised schemas are unchanged.
 
 ## `call` says when the overflow relay served it
 
@@ -401,7 +411,7 @@ challenge scopes while omitting the RFC 8707 `resource` parameter. In that case,
 requests keep the V1 default.
 
 **Each MCP version has its own audience set.** `mcp_resource_audiences(version)` includes the
-configured `public_url` plus `config.PUBLIC_HOST_ALIASES` for that version. This is symmetric so a
+configured `public_url` plus `Settings.public_host_aliases` for that version. This is symmetric so a
 grant survives a host change or rollback. Host and trailing-slash aliases can normalize within V1 or
 within V2, but they never cross versions. A V1 token fails on `/mcp/v2/`, and a V2 token fails on
 `/mcp/`.

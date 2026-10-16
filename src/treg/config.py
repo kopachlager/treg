@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, PositiveInt, field_validator, model_validator
+from pydantic import AliasChoices, Field, PositiveInt, field_validator, model_validator
 from urllib.parse import urlsplit
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -125,43 +125,13 @@ class Settings(BaseSettings):
     # The shared key-value store (Redis protocol). Empty = an in-process fallback; see infra/kv.py.
     kv_url: str = ""
 
-    # Root Web requests only; shared across keys/processes through Redis. Enabling requires
-    # an explicit outage policy. Unlisted and exempt orgs retain their existing behavior.
-    org_concurrency_enabled: bool = False
-    org_concurrency_limits: dict[int, int] = Field(default_factory=dict)
-    org_concurrency_exempt_org_ids: list[int] = Field(default_factory=list)
-    org_concurrency_redis_failure: Literal["fail_open", "fail_closed"] | None = None
-    org_concurrency_lease_s: float = Field(default=30, ge=3, le=300)
-    org_concurrency_retry_after_s: int = Field(default=1, ge=1, le=60)
-
-    @field_validator("org_concurrency_limits", mode="before")
-    @classmethod
-    def _org_concurrency_limits(cls, value):
-        if not isinstance(value, dict) or any(
-            not (type(org) is int and org > 0
-                 or isinstance(org, str) and re.fullmatch(r"[1-9][0-9]*", org))
-            or type(limit) is not int or limit <= 0
-            for org, limit in value.items()
-        ):
-            raise ValueError("org_concurrency_limits must map positive org IDs to positive integer limits")
-        if len({int(org) for org in value}) != len(value):
-            raise ValueError("org_concurrency_limits contains duplicate org IDs")
-        return value
-
-    @field_validator("org_concurrency_exempt_org_ids", mode="before")
-    @classmethod
-    def _org_concurrency_exemptions(cls, value):
-        if not isinstance(value, list) or any(type(org) is not int or org <= 0 for org in value):
-            raise ValueError("org_concurrency_exempt_org_ids must be a list of positive integer org IDs")
-        return value
+    # Published root-call pause, rate and concurrency admission.
+    org_flow_control_enabled: bool = False
+    org_flow_control_refresh_s: float = Field(default=2.0, ge=0.2, le=10)
 
     @model_validator(mode="after")
-    def _org_concurrency_configuration(self):
-        if self.org_concurrency_enabled:
-            if self.org_concurrency_redis_failure is None:
-                raise ValueError("enabled org concurrency requires an explicit org_concurrency_redis_failure")
-            if not self.kv_url.strip():
-                raise ValueError("enabled org concurrency requires shared Redis via kv_url")
+    def _org_flow_control_configuration(self):
+        if self.org_flow_control_enabled:
             try:
                 url = urlsplit(self.kv_url)
                 valid = (url.scheme in {"redis", "rediss"} and bool(url.hostname)
@@ -169,7 +139,7 @@ class Settings(BaseSettings):
             except ValueError:
                 valid = False
             if not valid:
-                raise ValueError("enabled org concurrency requires a valid Redis kv_url")
+                raise ValueError("enabled org flow control requires a valid Redis kv_url")
         return self
 
     # Optional same-org admission in front of a balance session (settlement, reserve, release).
@@ -179,6 +149,11 @@ class Settings(BaseSettings):
     money_admission_org_ids: list[PositiveInt] = Field(default_factory=list)
     money_admission_wait_s: float = Field(default=5.0, gt=0, le=120)
     money_admission_lease_s: float = Field(default=15.0, ge=3, le=300)
+    # The old Org retry floor was also used by money; retain that env spelling only here.
+    money_admission_retry_after_s: int = Field(
+        default=1, ge=1, le=60, validation_alias=AliasChoices(
+            "TREG_MONEY_ADMISSION_RETRY_AFTER_S", "TREG_ORG_CONCURRENCY_RETRY_AFTER_S",
+            "money_admission_retry_after_s"))
 
     # SQLite locally, Postgres on Render — same code path, just swap the URL.
     database_url: str = "sqlite+aiosqlite:///./treg.db"
@@ -701,6 +676,17 @@ class Settings(BaseSettings):
     # treg's own public base URL — used to build the OAuth callback (must be whitelisted in the
     # provider's OAuth app). Self-hosting? Set TREG_PUBLIC_URL to your deployment's URL.
     public_url: str = "https://treg.to"
+    public_host_aliases: tuple[str, ...] = ()
+
+    @field_validator("public_host_aliases")
+    @classmethod
+    def _public_host_aliases_shape(cls, hosts: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(dict.fromkeys(h.lower().rstrip(".") for h in hosts))
+        if any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", h)
+               or ".." in h for h in normalized):
+            raise ValueError("public_host_aliases must contain hostnames without schemes, paths or ports")
+        return normalized
+
     # Proof to OpenAI's plugin directory that we control this domain. The portal generates a token
     # and fetches it from /.well-known/openai-apps-challenge; that endpoint must return THAT token
     # and nothing else — not JSON, not a list. Empty (the default) leaves the route 404, which is the
@@ -711,6 +697,7 @@ class Settings(BaseSettings):
     # <public_url>/auth/github/callback and set these; empty disables the GitHub button.
     github_client_id: str = ""
     github_client_secret: str = ""
+
     # Signs the session cookie (HMAC). Falls back to secret_key if unset. Set a real value in prod.
     session_secret: str = ""
     # Overridable for tests; real GitHub by default.

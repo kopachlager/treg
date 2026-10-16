@@ -6,9 +6,12 @@
     treg-worker asynctasks settle [--limit 50]       # complete deferred metered-call holds
     treg-worker arena insights [--max-seconds 110]   # fold new audit rows into the Arena aggregate
     treg-worker catalog stats [--max-rows 500000]    # fold new audit rows into per-day endpoint stats
+    treg-worker catalog requeue-async-stats [--apply]   # preview or queue one async-window repair
+    treg-worker catalog repair-status --manifest <path>  # check the saved applied target list
     treg-worker spend rollup [--max-rows 50000]      # fold new ledger settles into per-key daily spend
     treg-worker jev xboost [--posts 60] [--min-likes 150]   # the /jev launch-radar demo: X posts <24h -> jev
     treg-worker admin purge-evidence [--batch-size 5000]  # blank expired error evidence past 14-day retention
+    treg-worker admin purge-ad-clicks                      # delete email-to-click stash rows past 90 days
     treg-worker admin erase-archive --org <id>             # erase what an opted-out team stored in the archive
 
 Not the light `treg` CLI: these need the server extra (DB, platform keys in the env) and make
@@ -336,9 +339,41 @@ async def _catalog_stats(args) -> int:
     from .application.catalog_stats import refresh
 
     await verify_db()
-    result = await refresh(max_rows=args.max_rows)
+    result = await refresh(max_rows=args.max_rows, max_dirty_buckets=args.max_dirty_buckets,
+                           max_repair_seconds=args.max_repair_seconds,
+                           bucket_timeout_s=args.bucket_timeout_seconds)
     print(json.dumps(result, sort_keys=True))
     return 0
+
+
+async def _catalog_requeue_async_stats(args) -> int:
+    from .infra.db import verify_db
+    from .application.catalog_stats import requeue_async_stats
+
+    await verify_db()
+    try:
+        result = await requeue_async_stats(apply=args.apply)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+async def _catalog_repair_status(args) -> int:
+    from pathlib import Path
+    from .infra.db import verify_db
+    from .application.catalog_stats import repair_status
+
+    try:
+        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+        await verify_db()
+        result = await repair_status(manifest)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["complete"] else 1
 
 
 async def _spend_rollup(args) -> int:
@@ -380,6 +415,16 @@ async def _admin_purge_evidence(args) -> int:
     result = await evidence_retention.purge(batch_size=args.batch_size)
     print(json.dumps(result, sort_keys=True))
     return 1 if result.get("error") else 0
+
+
+async def _admin_purge_ad_clicks(args) -> int:
+    """Delete email-to-click stash rows past the 90-day lookup window (application/signup)."""
+    from .application import signup
+    from .infra.db import verify_db
+
+    await verify_db()
+    print(json.dumps(await signup.purge_expired_ad_clicks(), sort_keys=True))
+    return 0
 
 
 async def _admin_erase_archive(args) -> int:
@@ -487,7 +532,23 @@ def main(argv: list[str] | None = None) -> int:
     stats = catalogsub.add_parser("stats", help="fold new audit rows into per-endpoint, per-day reliability stats")
     stats.add_argument("--max-rows", type=int, default=500_000,
                        help="audit rows to consume in one run; the next run resumes from the cursor")
+    stats.add_argument("--max-dirty-buckets", type=int, default=20,
+                       help="maximum endpoint/day corrections to attempt in one run (zero pauses repairs)")
+    stats.add_argument("--max-repair-seconds", type=float, default=60.0,
+                       help="total time budget for late-terminal corrections after the append fold")
+    stats.add_argument("--bucket-timeout-seconds", type=float, default=10.0,
+                       help="timeout for one endpoint/day replacement; failures stay queued for retry")
     stats.set_defaults(fn=_catalog_stats)
+    requeue = catalogsub.add_parser("requeue-async-stats",
+        help="preview existing mutable async day buckets; --apply queues one full repair")
+    requeue.add_argument("--apply", action="store_true",
+        help="reset target readiness and enqueue repairs (default: read-only preview)")
+    requeue.set_defaults(fn=_catalog_requeue_async_stats)
+    repair_status = catalogsub.add_parser("repair-status",
+        help="check coverage of the same database's saved applied repair manifest")
+    repair_status.add_argument("--manifest", required=True,
+        help="JSON output saved from requeue-async-stats --apply")
+    repair_status.set_defaults(fn=_catalog_repair_status)
     spend = sub.add_parser("spend", help="spend read models derived from the ledger")
     spendsub = spend.add_subparsers(dest="cmd", required=True)
     rollup = spendsub.add_parser("rollup", help="fold new ledger settles into per-key, per-tool, per-day spend")
@@ -509,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     purge.add_argument("--batch-size", type=_positive_int, default=5000,
                        help="rows to update per transaction (default 5000)")
     purge.set_defaults(fn=_admin_purge_evidence)
+    clicks = adminsub.add_parser("purge-ad-clicks", help="delete email-to-click stash rows past 90 days")
+    clicks.set_defaults(fn=_admin_purge_ad_clicks)
     erase = adminsub.add_parser("erase-archive", help="erase what an opted-out team stored in the archive")
     erase.add_argument("--org", type=_positive_int, required=True, help="the team's org id")
     erase.set_defaults(fn=_admin_erase_archive)

@@ -19,6 +19,7 @@ from ...application.hub import limits as hub_limits
 from ... import sandbox as demo_sandbox
 from ...client_identity import _norm_client
 from ...config import get_settings
+from ...domain.catalog import results as catalog_results
 from ...domain.catalog import store as catalog_store
 from ...domain import provider_resources
 from ...infra import money_admission
@@ -74,6 +75,7 @@ from .settle import (
     _finish_cancelled_call as finish_cancelled_call,
     _note_capacity_recovery,
     _note_capacity_signal,
+    _observed_cost_micro,
     _peek_stream_head,
     _platform_settle,
     _read_whole_if_small,
@@ -629,6 +631,7 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
     idem_fingerprint = intake.fingerprint
     if intake.replay is not None:
         replayed = intake.replay
+        request.context.replay_of = replayed.call_ref or None
         return _bytes_response(
             replayed.body,
             status_code=replayed.status_code,
@@ -679,6 +682,7 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
                 resolve_call_target(rest, caller, _resolve_call), request, call_ref)
             request.context.target = target
             tool, upstream_url = target.tool, target.upstream
+            request.context.tool_name = tool.name
         except CallFailure as exc:
             # Not a tool → maybe a marketplace endpoint id (`treg call tikhub.tiktok.video.comments`).
             # Only the 404 falls through, so an org tool with the same name always wins.
@@ -694,7 +698,11 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
             elif (isinstance(exc.detail, dict)
                     and str(exc.detail.get("hint", "")).startswith("your org has tool ")):
                 own_tool_miss = exc.detail
+    if ep is not None:
+        request.context.endpoint_id = ep["id"]
+        request.context.tool_name = ep["id"]
     if hub_row is not None:
+        request.context.tool_name = hub_row.tool_id
         # A hub tool: the runner runs every step through THIS use case again (child contexts,
         # own hold ids `{run}:s{n}`), then assembles one reply. The parent owns the idempotency
         # label and the X-Treg-* stamping, exactly like a routed endpoint.
@@ -856,6 +864,7 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
             raise
         tool, upstream_url, drop_params = mk.tool, mk.upstream, mk.consumed
         request.context.marketplace = mk
+        request.context.tool_name = tool.name
         mk.deferred = request.context.deferred_settles
     try:
         await _await_before_reserve(
@@ -1079,6 +1088,7 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
             has_body=request.has_body,
             read_body=request.body,
         ), request, call_ref)
+        request.context.endpoint_id = mk.endpoint_id
 
     if mk is not None:
         mk.deferred = request.context.deferred_settles
@@ -1283,7 +1293,7 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
                     catalog_store.load().by_id.get(mk.endpoint_id), own_credential=own_credential)
             # A probe must reach the vendor: an archived answer proves nothing about capacity.
             if (mk is not None and mk.probe_lock_id is None and archive.serving()
-                    and not archive_opted_out
+                    and not archive_opted_out and not _only_submits(mk)
                     and ((mk.metered and not mk.streamable_free_result) or own_key_cacheable)):
                 lookup_started = time.monotonic()
                 try:
@@ -1400,6 +1410,7 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
                 if (mk.metered and archive.recording() and not archive_opted_out
                         and 200 <= response.status < 300
                         and spooled_bytes is None and not _unfinished_submission(mk, body)
+                        and catalog_results.fails_expect(mk.endpoint_id, body) is None
                         and not (own_credential and _echoes_own_credential(tool, secrets, body))
                         and not _account_out_2xx(mk, response, body)):
                     _ct = next((v.decode("latin-1") for k, v in response.raw_headers
@@ -1539,7 +1550,9 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
             if deferred:
                 try:
                     charged = await async_task_app.defer_submission(
-                        mk, body, caller.org_id, tags=meta.tags)
+                        mk, body, caller.org_id, tags=meta.tags,
+                        submission_charge_micro=_observed_cost_micro(
+                            mk, body, httpx.Headers(response.raw_headers)))
                     observed = None
                     request.context.finalization = FinalizationState.FINALIZED
                 except Exception as exc:  # noqa: BLE001 - an accepted task must never orphan a hold
@@ -1558,14 +1571,16 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
                     )
                     deferred = False
             elif rejected:
-                # An async endpoint answered 2xx with no task in it (an error envelope, a WAF
-                # page, a changed schema): nothing to poll, nothing to charge. Closed now, not
-                # parked for 24 hours; the caller gets the body and sees $0.
+                # An async endpoint answered 2xx with no accepted task to track (an error
+                # envelope, a WAF page, a changed schema): nothing to poll. Closed now, not parked
+                # for 24 hours, at what the provider reported charging, else zero. A batch whose
+                # first task was refused can still carry accepted, billed tasks the caller owns.
+                reported = _observed_cost_micro(mk, body, httpx.Headers(response.raw_headers))
                 logging.getLogger("treg.asynctasks").warning(
-                    "call %s on %s: 2xx but not an accepted submission (%s); settled at zero",
-                    call_ref, mk.endpoint_id, rejected)
+                    "call %s on %s: 2xx but not an accepted submission (%s); settled at %s",
+                    call_ref, mk.endpoint_id, rejected, reported or 0)
                 charged, observed = await _platform_settle(
-                    mk, response.status, body, observed_override=0, reason=rejected,
+                    mk, response.status, body, observed_override=reported or 0, reason=rejected,
                     finalized=lambda: setattr(
                         request.context, "finalization", FinalizationState.FINALIZED),
                 )
@@ -1722,6 +1737,12 @@ async def _execute_call(request: _ApplicationRequest, upstream_client: httpx.Asy
         _set_response_header(response, "X-Treg-Call-Id", call_ref)
         if served_via:
             _set_response_header(response, "X-Treg-Served-Via", served_via)
+        elif (200 <= response.status < 300 and spooled_bytes is None and not deferred
+                and (upstream_failed := catalog_results.fails_expect(mk.endpoint_id, body))):
+            # The provider answered 2xx but its own success rule says the request failed (a
+            # DataForSEO task status other than 20000). The body is relayed untouched and the
+            # charge is what the provider reported; this header is how the caller learns it.
+            _set_response_header(response, "X-Treg-Upstream-Failed", upstream_failed)
         if smoothed:
             _set_response_header(response, "X-Treg-Smoothed", " ".join(smoothed))
         return response
@@ -1771,11 +1792,23 @@ def _finished_on_submission(mk, body: bytes) -> bool:
     return asynctasks_rules.finished_on_submission(mk.async_descriptor, document)
 
 
+def _submits(mk) -> bool:
+    """A row whose answer may be a job or task id rather than an answer: it creates something the
+    caller owns (`resource_ownership.produces`: a job, a snapshot, a crawl) or it is async."""
+    return bool((mk.resource_ownership or {}).get("produces") or mk.async_descriptor)
+
+
 def _unfinished_submission(mk, body: bytes) -> bool:
-    """A row whose first answer may already be finished answered "still working" instead: a task
-    id, not an answer, so the archive keeps nothing a later identical question could replay."""
-    return ((mk.async_descriptor or {}).get("terminal_on_submission") is True
-            and not _finished_on_submission(mk, body))
+    """A submitting row's answer that is not a finished answer: the archive keeps nothing a later
+    identical question could replay, or it would be sold another team's job or task id instead of
+    one of its own. A `terminal_on_submission` row's finished answer is an answer, so it may stay."""
+    return _submits(mk) and not _finished_on_submission(mk, body)
+
+
+def _only_submits(mk) -> bool:
+    """A submitting row never served from the archive: every call must reach the provider. A row
+    that may answer at once (`terminal_on_submission`) archives only finished answers, so it may."""
+    return _submits(mk) and (mk.async_descriptor or {}).get("terminal_on_submission") is not True
 
 
 def _submission_rejected(mk, body: bytes) -> str:

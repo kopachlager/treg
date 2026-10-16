@@ -54,9 +54,12 @@ related:
 finalization. `application.call.resolve` selects the target and credential;
 `infra.upstream.relay.relay` only injects credentials and forwards bytes.
 
-The shared HTTP ingress can apply default-disabled [Org concurrent-request admission](org-concurrency.md)
-before `execute_call`. Configured orgs share Redis slots across keys and workers; streaming retains
-the root slot through response cleanup. Routing children do not acquire additional root slots.
+The shared HTTP ingress can apply default-disabled [published Org admission](org-flow-control.md)
+before `execute_call`. Configured Orgs share rate tokens and Redis slots across keys and workers;
+when rate is configured, one Redis operation checks both limits before consuming either.
+Streaming retains the root slot through response cleanup. Routing children do not acquire
+additional root slots or rate tokens. Published null disables its limit; legacy environment
+maps have no effect.
 
 Named catalog calls with authorization metadata select the provider and grant method before
 comparing hosts. This separates Facebook and Instagram tools sharing `graph.facebook.com`;
@@ -481,7 +484,10 @@ Catalog `platform_request` checks and provider-specific request guards run only 
 offer is selected and before reserve. Exact selectors require evidence such as Tavily Search's
 caller-supplied `include_usage: true`. Openmart requires its explicit bounded record count; Tavily
 Map and Crawl require an integer `limit` from 1 to 20. Missing, Boolean and out-of-range values are
-caller errors. BYOK is unchanged because the provider, not treg, bears that account's exposure.
+caller errors. A request option whose result or charge arrives later at a caller's webhook, outside
+the response settlement reads, is refused outright: Ocean.io's contact reveals, and Apollo person
+enrichment's phone reveal, waterfalls, `webhook_url` and `poll_only`. BYOK is unchanged because the
+provider, not treg, bears that account's exposure.
 
 Tier 4 spends treg's own vendor account, and that account can be empty. `_resolve_marketplace_call`
 asks, after `_platform_offer` says yes: is this call **exhausted** in the in-process capacity view
@@ -632,7 +638,8 @@ A catalog endpoint carrying an `async` descriptor resolves like any other (`reso
 the `MarketplaceCall`). In `service._execute_call`, a metered 2xx from such an endpoint is
 **deferred** (`application.asynctasks.defer_submission` writes the pending row and leaves the hold
 open) unless `_submission_rejected` says the body is not an accepted submission (not JSON, `expect`
-rule failed, no task id), in which case it settles at zero at once, or the descriptor's
+rule failed, no task id), in which case it settles at once at the provider's reported charge, else
+zero, or the descriptor's
 `terminal_on_submission` finds a success word in the submission itself, in which case it settles on
 the response like a synchronous call; a persistence failure releases the hold with an alert. The
 body the caller receives is the provider's either way. On such a row a "still working" submission
@@ -756,3 +763,15 @@ relay. BYOK and raw own-tool access keep their existing credential ACLs. The sha
 cannot receive one upstream job through provider deduplication. Unpinned digests are unchanged.
 `intake.prepare_call_intake` includes the same full pin in Treg's membership replay namespace. See
 [multi-tenancy](multi-tenancy.md#caller-tags-and-pinned-read-scopes) for the history and ledger scopes.
+
+## Optional published root admission
+
+The shared `run_call_surface` checks [published Org flow control](org-flow-control.md) after identity
+and context creation, before financial admission. One effective snapshot supplies pause, rate and
+concurrency checks. It can refuse new root calls with 429 for an active valid pause, an exhausted
+rate bucket or a full published concurrency limit. Rate and concurrency refusals consume neither
+token nor slot; tokens already spent on admission are not refunded after later failure or
+cancellation. Redis failures allow calls; missing keys clear cached rules, and
+malformed or conflicting publications retain the previous valid snapshot and original pause expiry.
+Existing accepted work and its financial cleanup continue. This optional default-off check does
+not cover direct hub, provider-resource or background execution outside the shared surface.

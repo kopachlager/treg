@@ -35,6 +35,8 @@ sources:
   - src/treg/alembic/versions/0035_default_key_generation.py
   - src/treg/alembic/versions/0036_activity_key_indexes.py
   - src/treg/alembic/versions/0038_endpoint_day_stats.py
+  - src/treg/alembic/versions/0074_endpoint_stat_dirty.py
+  - src/treg/infra/catalog_stat_dirty.py
   - src/treg/maintenance.py
   - src/treg/web/sitetrack.js
   - src/treg/models.py
@@ -54,6 +56,9 @@ sources:
   - src/treg/alembic/versions/0066_endpointdaystat_verdicts.py
   - src/treg/alembic/versions/0070_api_key_spend_rollup.py
   - src/treg/alembic/versions/0072_callrecord_call_ref_index.py
+  - src/treg/alembic/versions/0073_org_flow_control_version.py
+  - tests/test_org_flow_control_schema.py
+  - src/treg/alembic/versions/0075_ad_click_stash.py
   - src/treg/timeutil.py
   - src/treg/infra/db.py
   - src/treg/infra/money_timing.py
@@ -158,6 +163,26 @@ See [signup eligibility](money.md#signup-credit-eligibility).
 Revision `0071` adds `SignupPromoClaim` (`inbox` primary key, `user_id` with no FK, `created_at`):
 one row per mailbox that received the signup gift, staged with the user-level claim. It is
 backfilled from users already verified and no longer eligible.
+
+## Org flow-control configuration storage
+
+Revision `0073` adds `OrgFlowControlVersion` (`orgflowcontrolversion`), keyed by
+`(org_id, version)`. Each row stores a required full `config` snapshot (JSONB on PostgreSQL,
+JSON on SQLite), creator, reason, and UTC creation time. Publication metadata records
+`unpublished`, `pending`, `published`, or `failed`, with an optional publisher and publication
+time; `published` requires both. The primary key supports per-Org history, and
+`ix_orgflowcontrolversion_publish_status` supports bounded publication-state scans.
+
+This is storage only: there is no configuration API, publisher, or call-path reader yet.
+The schema enforces unique positive versions and valid publication metadata. Allocation of
+increasing versions, JSON schema validation, and immutable snapshots are management-writer
+responsibilities; this migration does not grant that writer access or prohibit arbitrary
+SQL updates. No rows are backfilled and existing request admission is unchanged.
+`org_id` has no foreign key, keeping this migration independent of locks on the balance table.
+`cascade_delete_org` explicitly removes this history with its Org. The management writer must
+validate Org existence and coordinate saves with Org deletion before its cleanup begins;
+direct SQL writes or deletes have no database-enforced referential integrity.
+An application rollback leaves the table in place; a schema downgrade deletes its saved history.
 
 ## Registry tables
 
@@ -294,15 +319,27 @@ uses this metadata, never the encrypted token's shape.
   here queues every other query and the API pool empties into `503 treg_saturated` - see
   [deploy](../ops/deploy.md) § Database pools. The table has no retention sweep yet, so it only grows.
 
-  **Nothing on the request path aggregates it any more.** The two readers that did, the catalog's
-  observed reliability and the Arena's rolling insights, are scheduled `treg-worker` commands
-  that walk it incrementally by primary key. Revision 0038 adds their catalog half:
+  **Catalog reliability reads scheduled folds.** Its cache refreshes no longer aggregate raw audit
+  rows. The catalog statistics and Arena rolling insights workers walk audit rows incrementally
+  by primary key. Revision 0038 adds the catalog's daily read model:
   `EndpointDayStat` (one row per endpoint per UTC day: counts, newest success, hit tallies and a
   bounded latency sample, plus `verdicts`, calls per verdict word, added nullable by `0066`;
   primary key `(endpoint_id, day)`, indexed by `day` for the window prune)
   and the single-row `EndpointStatCursor` (`cursor_id`, the `created_at` watermark and
-  `caught_up_at`, which is what lets the reader fall back to the live aggregate until the worker
-  has caught up). `application/catalog_stats.py` is the only writer of both; see
+  `caught_up_at`). The reader requires a recent completed fold and never falls back to a live
+  aggregate. `application/catalog_stats.py` is the only writer of both. Revision `0074` adds
+  `terminal_reconciled` (false for legacy buckets) and `EndpointStatDirty`: primary key
+  `(endpoint_id, day)`, monotonically incremented `revision`, uncovered-correction age bound
+  `queued_at`, and indexed retry scheduling `(retry_at, endpoint_id, day)`.
+  `infra/catalog_stat_dirty.py` owns all
+  marker writes, without committing: audit marks the original day in the same transaction as its
+  terminal update; the worker replaces a whole bucket through its fold cursor and acknowledges
+  only an unchanged revision. Notifications preserve `queued_at`; a successful full replacement
+  advances a retained newer revision's age bound to the source scan start in the same transaction,
+  without moving a newer timestamp backwards or changing retry backoff. Failed replacements
+  preserve the old age. Existing async/result-adapter buckets are queued from the summary
+  table and remain unavailable until corrected. These tables are optional analytics and never
+  determine a money transaction. See
   [catalog](catalog.md) § Choosing between providers.
 
   **`LedgerEntry` is the other one, and it was the larger.** It is append-only and never pruned
@@ -661,9 +698,14 @@ These observations remain best effort through the existing bounded analytics que
 `fallback`). Eligible calls record the same timing boundary when admission is disabled. An empty
 org list on `close`, `deferred`, `async`, or `hub` still skips the observation. `reserve` and
 `release` with an empty or invalid org raise `AdmissionRefused` before a session and do not record
-a fallback row. `fallback_*` counts, including `fallback_wait_timeout` on `reserve` and `release`,
-are degradation: the body still ran on the database path. A redis lease is the only mode that
-keeps same-org balance sessions from stacking on the pool.
+a fallback row. `fallback_*` counts in mode `fallback` are degradation: the body still ran on the
+database path. A reserve acquisition timeout instead records `rejected=1` in mode `redis`, with
+`failed=0`, zero execution time and no active scope or fallback count. Cancellation during its
+cleanup remains a cancellation, not a rejection or fallback. `reserve_admission` also emits one
+best-effort `money_admission_rejected` WARNING per refusal with the numeric `org_id`, operation,
+reason and jittered `retry_after_s`; org IDs remain out of aggregate dimensions. Release and
+settlement timeouts still record mode `fallback`. A Redis lease serializes admitted same-org
+balance work; reserve timeout rejection keeps those expired waiters out of the funds transaction.
 
 `money_admission_reporting.emit_snapshot` writes one local JSON record and queues one PostHog event
 per populated operation/mode, through the existing web minute timer and final partial window.
@@ -951,3 +993,12 @@ the index. PostgreSQL uses `CREATE INDEX CONCURRENTLY` in this separate revision
 transactions commit. It retains valid indexes, rebuilds invalid debris from an interrupted build,
 and restores the normal migration timeouts. SQLite creates the same partial indexes normally.
 The PostgreSQL build still scans each table and uses I/O; no production build duration is claimed.
+
+## Email-to-click attribution stash
+
+`AdClickStash` (additive revision `0075`) is owned by `application.signup.stash_ad_click`.
+Its email primary key supplies uniqueness and indexed lookup; `raw_cookie` stores the encoded,
+length-capped click fields, and `created_at`/`updated_at` use naive UTC. Authentication routes
+submit observations of proven emails; cookie-less signup uses observations from the last 90 days.
+Signup deletes the row once its team holds the click, and `treg-worker admin purge-ad-clicks`
+deletes rows past 90 days. No analytics or audit emission is involved. See [ads conversions](ads-conversions.md).

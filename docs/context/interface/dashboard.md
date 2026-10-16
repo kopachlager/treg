@@ -125,8 +125,11 @@ it is received cannot recover a hash-stored key. The UI tells the user to save i
 ## Spend per API key
 
 Team -> API Keys has a "Spent last 30 days" column, from `GET /orgs/{id}/api-keys/spend`, which
-reads only the daily spend rollup; amounts show to the cent (cut, never rounded up) with the exact
-figure on hover, here and in the Usage spend list. Admins also see the team's "No API key" total, with an ⓘ that
+reads only the daily spend rollup; amounts show to the cent (cut, never rounded up), here and everywhere
+on the Usage Spend card (its total, the chart's axis and tooltip, the Other list and the ranking).
+Where an amount can be pointed at, `components/ui/Money.vue` shows its exact micro-USD figure at
+once on hover or keyboard focus (the column, the "No API key" total, the card total, the ranking
+and the Other list); the chart's own tooltip follows the pointer, so it shows the short figure. Admins also see the team's "No API key" total, with an ⓘ that
 says where such charges come from (`NO_KEY` in `state/constants.js`). Until the rollup has caught
 up once, every cell shows "Preparing…" with "Spend history is being prepared. It will appear here within a few days." on hover. The page never labels
 anything as calls: one call can make several charges.
@@ -137,6 +140,20 @@ month (`SpendBars.vue`), stacked by API key or, within one provider, by tool, wi
 rollup's history ("History starts on ..."). The card loads on its own, never waits for the usage
 counts below it, and says "Spend history is being prepared. It will appear here within a few days." like the API Keys tab until the rollup has
 caught up once.
+
+The rest of Usage loads in parallel with the card, each section on its own and with its own
+error: the counts (`GET /orgs/{id}/usage`: the stat cards, By member, Top tools, Per day) and each
+"Spend by <tag>" section. The 7/30/90-day buttons reload only those, not the card. Top tools and
+Per day show ten rows at a time (Per day newest first), paged in the browser: one answer already
+holds every row, so a page turn costs no request.
+
+Activity and Team carry their tab in the address (`state/navigation.js`, `parseTabHash`):
+`#activity/calls`, `#activity/usage`, `#orgs/members`, `#orgs/keys`, `#orgs/billing` and the rest,
+and the Calls tab also its key filter, by id: `#activity/calls?key=7`. The spend chart's key filter
+stays inside its card and out of the address, since it filters the chart only, not the tab. A reload
+or a shared link opens the same tab and key; changing a tab or key rewrites the current history entry, so Back leaves the page. An API
+key's Activity button opens `#activity/calls?key=<id>`. The old `#usage` and `#billing` links still
+land, and the address then names the tab. Opening Activity without a tab still lands on Calls.
 
 ## Catalog, Connections, a provider
 

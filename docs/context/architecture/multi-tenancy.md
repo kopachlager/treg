@@ -72,6 +72,9 @@ change is required. This is a current-ownership cap, not a daily creation limit.
 [Enrich Arena](../interface/enrich-arena.md) runs and evaluations require both the creating user
 and the active team to match. Regular team membership alone does not expose another member's results.
 Team deletion removes evaluations before their runs through `ORG_SCOPED_MODELS`.
+`OrgFlowControlVersion` configuration history is also in that list and is explicitly deleted
+with its Org. Its `org_id` intentionally has no foreign key; management writes must validate
+Org existence and coordinate with deletion before cleanup starts. See [configuration storage](data-model.md#org-flow-control-configuration-storage).
 
 - **`Org`** — `id, name, slug (unique), previous_slug, suspended, demo, public_demo, created_at`. The tenant that owns
   secrets/tools/bundles. **`public_demo`** marks a team whose member token is PUBLISHED (e.g. on the
@@ -344,8 +347,8 @@ bearer path refuses it once expired rather than reviving an expired cookie.
 - **Org management endpoints:** `register_user` (`POST /users`, legacy open-registration, used by the
   test fixture) still creates the user + an org + owner membership via `_make_org_membership` (mints the
   token) — NOT reached by the dashboard/CLI login doors, which no longer auto-make an org. Both this door
-  and `create_org` read the first-party ad-click cookie (`application.signup._ad_attribution_from`) and,
-  when enabled and present, stamp `Org.ad_gclid`/`ad_click_id_type`/`ad_landing`/`ad_click_at` on the
+  and `create_org` read the first-party ad-click cookie (`application.signup._ad_attribution_from`),
+  or the email's `AdClickStash` row when the request has no cookie, and, when enabled and present, stamp `Org.ad_gclid`/`ad_click_id_type`/`ad_landing`/`ad_click_at` on the
   new org — preserving whether the click was a GCLID, GBRAID or WBRAID — see
   [ads-conversions](ads-conversions.md). `create_org`
   (`POST /orgs`, `require_identity`),
@@ -476,7 +479,10 @@ the ledger/hold it references. Pinned read scopes do not change budget concurren
   must resolve their id through an org-owned `AsyncTaskRecord` or `AsyncResourceRecord` before the
   upstream is contacted. `_one_resource_value` reads the id from the query string or, when the
   catalog descriptor names a body parameter (`in: body`), from the JSON body — either way exactly one
-  value must be supplied. BYOK calls keep access to ids in the team's own provider account.
+  value must be supplied. A body may be one object or a provider's array of task objects
+  (DataForSEO's `[{"id": ...}]`); every element must name that same id, so an owned first task
+  cannot carry another team's id in a second. A `produces` path may take every list item with `*`
+  (`tasks.*.id`): one submission of several tasks owns each of them. BYOK calls keep access to ids in the team's own provider account.
 - **Shared-provider durable objects are org-scoped.** A platform-key managed-resource call verifies
   every scalar or array id against `ProviderResource` before contacting the provider. A `use` tool
   may additionally declare a read-only public lookup: an id absent from the ownership table is

@@ -12,7 +12,8 @@ from datetime import date, datetime, timezone
 from typing import Annotated
 
 from pydantic import NaiveDatetime
-from sqlalchemy import BigInteger, Boolean, JSON, CheckConstraint, Column, Index, Integer, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, JSON, CheckConstraint, Column, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 # SQLModel 0.0.45+ rejects naive datetime binds unless fields are annotated with NaiveDatetime.
@@ -147,6 +148,46 @@ class Org(SQLModel, table=True):
     # flag because the moment the team objected is the processing record. Appended last, like the
     # column above, so create_all schemas match the migrated shape.
     archive_opt_out_at: NaiveUTC | None = Field(default=None)
+
+
+class OrgFlowControlVersion(SQLModel, table=True):
+    """Stored Org control snapshots; no call-path reader or publisher is attached yet."""
+
+    __table_args__ = (
+        CheckConstraint("version > 0", name="ck_orgflowcontrolversion_version"),
+        CheckConstraint(
+            "publish_status IN ('unpublished', 'pending', 'published', 'failed')",
+            name="ck_orgflowcontrolversion_publish_status",
+        ),
+        CheckConstraint(
+            "length(trim(created_by)) > 0 AND "
+            "(published_by IS NULL OR length(trim(published_by)) > 0)",
+            name="ck_orgflowcontrolversion_actors",
+        ),
+        CheckConstraint("length(trim(reason)) > 0", name="ck_orgflowcontrolversion_reason"),
+        CheckConstraint(
+            "publish_status != 'published' OR "
+            "(published_by IS NOT NULL AND published_at IS NOT NULL)",
+            name="ck_orgflowcontrolversion_published",
+        ),
+        Index("ix_orgflowcontrolversion_publish_status", "publish_status", "org_id", "version"),
+    )
+    org_id: int = Field(primary_key=True)  # Org existence is validated by the management writer.
+    version: int = Field(primary_key=True)
+    # Required full snapshot. The management writer must validate its schema and append versions;
+    # this storage model does not itself prevent updates to config or allocate version numbers.
+    config: dict = Field(sa_column=Column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=False,
+    ))
+    publish_status: str = Field(default="unpublished", sa_column=Column(
+        String, nullable=False, server_default="unpublished",
+    ))
+    created_by: str
+    published_by: str | None = Field(default=None)
+    reason: str
+    created_at: NaiveUTC = Field(default_factory=_now)
+    published_at: NaiveUTC | None = Field(default=None)
 
 
 class User(SQLModel, table=True):
@@ -635,6 +676,16 @@ class Secret(SQLModel, table=True):
     last_error: str = Field(default="")
 
     created_at: NaiveUTC = Field(default_factory=_now)
+
+
+class AdClickStash(SQLModel, table=True):
+    """First-party click observed alongside an email, usable for 90 days."""
+
+    email: str = Field(primary_key=True)
+    # Percent-encoded kind + capped 255-character id + 64-character landing (12 bytes per Unicode char).
+    raw_cookie: str = Field(max_length=4096)
+    created_at: NaiveUTC = Field(default_factory=_now)
+    updated_at: NaiveUTC = Field(default_factory=_now)
 
 
 class AdConversion(SQLModel, table=True):
@@ -2049,13 +2100,37 @@ class EndpointDayStat(SQLModel, table=True):
     # Calls per contract verdict word (`CallRecord.verdict`), `{"valid": 31, "catch_all": 4}`.
     # NULL on a bucket folded before the column existed; read as empty.
     verdicts: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    # Legacy async buckets need a full recount before their mutable terminal evidence is read.
+    terminal_reconciled: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false")))
+
+
+class EndpointStatDirty(SQLModel, table=True):
+    """An audit-corrected endpoint/day whose reliability bucket needs a recount.
+
+    Audit marks the actual submission day in the same transaction as its terminal correction.
+    The catalog worker replaces that day's folded evidence and acknowledges only the revision
+    it read, so another correction during a recount remains queued. A successful full recount
+    advances a retained marker's age bound to the source scan start; failures preserve its age.
+    This is lossy analytics, separate from the durable task status and money transaction.
+    """
+
+    __table_args__ = (Index("ix_endpointstatdirty_retry_at_endpoint_id_day",
+                            "retry_at", "endpoint_id", "day"),)
+
+    endpoint_id: str = Field(primary_key=True)
+    day: str = Field(primary_key=True)
+    revision: int = Field(
+        default=1, sa_column=Column(BigInteger, nullable=False, server_default=text("1")))
+    queued_at: NaiveUTC = Field(default_factory=_now)  # oldest uncovered correction's age bound
+    retry_at: NaiveUTC = Field(default_factory=_now)
 
 
 class EndpointStatCursor(SQLModel, table=True):
     """Where `application.catalog_stats.refresh` has got to in `callrecord`, and whether it has
     caught up. One row (`id = "callrecord"`). `caught_up_at` is NULL until a run drains the backlog,
-    and the catalog keeps computing observations live until then, so a fresh install or a
-    deployment that has not scheduled the worker yet behaves exactly as before.
+    and the catalog publishes no observations until a recent run has caught up. Missing or stale
+    worker evidence never authorizes a request-triggered audit-table aggregate.
     """
 
     id: str = Field(primary_key=True)

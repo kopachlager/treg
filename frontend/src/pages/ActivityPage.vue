@@ -6,6 +6,7 @@ import SpendBars from '../components/SpendBars.vue'
 import SelectMenu from '../components/ui/SelectMenu.vue'
 import DateRangePicker from '../components/ui/DateRangePicker.vue'
 import InfoTip from '../components/ui/InfoTip.vue'
+import Money from '../components/ui/Money.vue'
 import { NO_KEY } from '../state/constants.js'
 
 // The feed reads left to right as one sentence: when, who (the key and runtime under it), which call
@@ -29,11 +30,15 @@ const PAGE = 10
 const dayLabel = (iso, opts) => new Date(iso + 'T00:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', ...opts })
 
 export default {
-  components: { PageTabs, DataTable, SpendBars, SelectMenu, DateRangePicker, InfoTip },
+  components: { PageTabs, DataTable, SpendBars, SelectMenu, DateRangePicker, InfoTip, Money },
   setup: useDashboard,
   data: () => ({ feedColumns: FEED, memberColumns: BY_MEMBER, toolColumns: BY_TOOL, dayColumns: BY_DAY, tagColumns: BY_TAG, spendColumns: BY_SERIES, GROUPS, STACKS, PAGE, NO_KEY }),
   computed: {
     // The filter lists keep the current choice even when the new range has no spend for it.
+    daysNewestFirst() { return [...(this.usage?.by_day || [])].reverse() },
+    activityKeyOptions() {
+      return [{ value: '', label: 'All API keys' }, ...this.apiKeys.map(k => ({ value: String(k.id), label: this.keyLabel(k) }))]
+    },
     spendKeyOptions() {
       return [{ value: '', label: 'All API keys' }, ...(this.usageSpend?.options?.keys || []).map(k => ({ value: String(k.id), label: k.name }))]
     },
@@ -48,7 +53,7 @@ export default {
     // What the Other slice holds over the whole range: every ranked series without its own color.
     foldedRanking() {
       const shown = new Set((this.usageSpend?.series || []).map(s => s.id))
-      return (this.usageSpend?.ranking || []).filter(r => !shown.has(r.id)).map(r => ({ id: r.id, name: r.name, value: this.money(r.spent_micro) }))
+      return (this.usageSpend?.ranking || []).filter(r => !shown.has(r.id)).map(r => ({ id: r.id, name: r.name, micro: r.spent_micro }))
     },
     spendBuckets() {
       const s = this.usageSpend
@@ -103,9 +108,7 @@ export default {
 
   <template v-if="actTab==='feed'">
   <div class="cn-filters">
-    <select class="pl-select act-key" v-model="activityKey" @change="loadCalls" aria-label="API key">
-      <option value="">All API keys</option><option v-for="k in apiKeys" :key="k.id" :value="String(k.id)">{{k.identity}} - {{k.name}}</option>
-    </select>
+    <SelectMenu v-model="activityKey" class="act-key" size="lg" icon="key" label="API key" :options="activityKeyOptions" @change="loadCalls" />
     <div class="seg pl-seg" role="radiogroup" aria-label="Which calls">
       <button role="radio" :aria-checked="actOkOnly" :class="{on:actOkOnly}" @click="actOkOnly=true" title="Hide failed and refused calls">Succeeded <span>{{activityOkRows.length}}</span></button>
       <button role="radio" :aria-checked="!actOkOnly" :class="{on:!actOkOnly}" @click="actOkOnly=false" title="Include failed and refused calls">All <span>{{activityRows.length}}</span></button>
@@ -145,7 +148,7 @@ export default {
         <p class="muted">Billed charges on treg's keys, from the ledger. Days are UTC.<template v-if="historyFrom"> History starts on {{historyFrom}}.</template></p>
       </div>
       <div v-if="usageSpend && usageSpend.ready" class="us-totals">
-        <div><b>{{money(usageSpend.spent_micro)}}</b><span>spent</span></div>
+        <div><b><Money :micro="usageSpend.spent_micro" /></b><span>spent</span></div>
         <div><b>{{usageSpend.charges}}</b><span>{{usageSpend.charges === 1 ? 'charge' : 'charges'}}</span></div>
       </div>
     </header>
@@ -170,7 +173,7 @@ export default {
       <p v-else-if="!usageSpend.spent_micro" class="pl-empty">No billed charges in this range.</p>
       <template v-else>
         <SpendBars :buckets="spendBuckets" :series="spendSeries"
-                   :aria-label="`Billed spend by ${usageSpend.group}: ${money(usageSpend.spent_micro)} from ${usageSpend.from} to ${usageSpend.to}`" />
+                   :aria-label="`Billed spend by ${usageSpend.group}: ${moneyGlance(usageSpend.spent_micro)} from ${usageSpend.from} to ${usageSpend.to}`" />
         <!-- Every series, none folded: the chart can color seven, a list can name them all. A key's
              row filters the chart to it; the chart answers "when", this list "who". -->
         <button type="button" class="us-rank-toggle" :aria-expanded="spendRankOpen" aria-controls="us-ranking" @click="spendRankOpen=!spendRankOpen">
@@ -183,7 +186,7 @@ export default {
             <template #head-name>{{usageSpend.stack==='tool' ? 'Tool' : 'API key'}}</template>
             <template #cell-name="{ row: r }"><span class="us-rank-name"><s :style="{ background: rankColor(r) }"></s><span :title="r.name">{{r.name}}</span><InfoTip v-if="r.id==='none'" :title="NO_KEY.title" :text="NO_KEY.text" /></span></template>
             <template #cell-share="{ row: r }"><span class="us-share"><i :style="{ width: share(r) + '%' }"></i></span><span class="muted">{{share(r)}}%</span></template>
-            <template #cell-spend="{ row: r }"><b :title="money(r.spent_micro)">{{moneyGlance(r.spent_micro)}}</b></template>
+            <template #cell-spend="{ row: r }"><b><Money :micro="r.spent_micro" /></b></template>
           </DataTable>
           <div v-if="usageSpend.ranking.length > PAGE" class="us-pager">
             <span class="muted">{{pageLabel(usageSpend.ranking, spendRankPage)}}</span>
@@ -197,12 +200,14 @@ export default {
 
   <div class="cn-filters">
     <div class="seg pl-seg" role="radiogroup" aria-label="Window">
-      <button v-for="d in [7,30,90]" :key="d" role="radio" :aria-checked="usageDays===d" :class="{on:usageDays===d}" @click="usageDays=d; loadUsage()">{{d}} days</button>
+      <button v-for="d in [7,30,90]" :key="d" role="radio" :aria-checked="usageDays===d" :class="{on:usageDays===d}" @click="usageDays=d; usageToolPage=0; usageDayPage=0; loadUsageCounts(); loadTagUsage()">{{d}} days</button>
     </div>
     <span class="pl-meta pl-push">Counts only. No request or response content is stored.</span>
   </div>
 
-  <div v-if="usage">
+  <p v-if="usageErr" class="pl-empty">{{usageErr}}</p>
+  <p v-else-if="!usage" class="pl-empty">Loading counts…</p>
+  <template v-else>
     <div class="act-stats">
       <div v-for="[n, l] in [[usage.totals.total, 'Total events'], [usage.totals.call, 'API calls'], [usage.totals.local_run, 'Local runs'], [usage.totals.server_run, 'Server runs']]"
            :key="l" class="pl-card act-stat"><b>{{n}}</b><span>{{l}}</span></div>
@@ -217,17 +222,29 @@ export default {
     </section>
 
     <div class="act-pair">
+      <!-- Ten rows at a time, paged here: one request already holds every row, so Next is free. -->
       <section v-if="usage.by_tool.length" class="pl-sec">
-        <h2 class="pl-h"><span>Top tools</span><i></i></h2>
-        <DataTable :columns="toolColumns" :rows="usage.by_tool" :row-key="t => t.name" surface />
+        <h2 class="pl-h"><span>Top tools</span><i></i><em>{{usage.by_tool.length}}</em></h2>
+        <DataTable :columns="toolColumns" :rows="page(usage.by_tool, usageToolPage)" :row-key="t => t.name" surface />
+        <div v-if="usage.by_tool.length > PAGE" class="us-pager">
+          <span class="muted">{{pageLabel(usage.by_tool, usageToolPage)}}</span>
+          <button class="btn sm" :disabled="!usageToolPage" @click="usageToolPage--">Previous</button>
+          <button class="btn sm" :disabled="(usageToolPage+1)*PAGE >= usage.by_tool.length" @click="usageToolPage++">Next</button>
+        </div>
       </section>
       <section v-if="usage.by_day.length" class="pl-sec">
-        <h2 class="pl-h"><span>Per day</span><i></i></h2>
-        <DataTable :columns="dayColumns" :rows="usage.by_day" :row-key="d => d.day" surface>
+        <h2 class="pl-h"><span>Per day</span><i></i><em>{{usage.by_day.length}}</em></h2>
+        <DataTable :columns="dayColumns" :rows="page(daysNewestFirst, usageDayPage)" :row-key="d => d.day" surface>
           <template #cell-day="{ row: d }"><span class="mono muted">{{d.day}}</span></template>
         </DataTable>
+        <div v-if="usage.by_day.length > PAGE" class="us-pager">
+          <span class="muted">{{pageLabel(usage.by_day, usageDayPage)}}</span>
+          <button class="btn sm" :disabled="!usageDayPage" @click="usageDayPage--">Newer</button>
+          <button class="btn sm" :disabled="(usageDayPage+1)*PAGE >= usage.by_day.length" @click="usageDayPage++">Older</button>
+        </div>
       </section>
     </div>
+  </template>
 
     <!-- SPEND BY CALLER TAG - one section per key the team has ACTUALLY SENT, not a picker.
          A dropdown hides the other dimensions behind an interaction, and the whole point of
@@ -250,8 +267,6 @@ export default {
         </DataTable>
       </section>
     </template>
-  </div>
-  <p v-else class="pl-empty">Loading…</p>
   </template>
 </div>
 </template>
