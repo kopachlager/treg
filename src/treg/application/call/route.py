@@ -360,8 +360,8 @@ async def build_plan(ep: dict, identity_given: dict, caller, options: RouteOptio
         cands = kept
     return Plan(contract=contract, identity=identity, variant=variant,
                 candidates=rank(cands, prefer=options.prefer or list(contract.prefer), exclude=options.exclude,
-                                given=given,
-                                derive=contract.derive), dropped=dropped)
+                                given=given, derive=contract.derive,
+                                one_subject=contract.one_subject), dropped=dropped)
 
 
 def _child_input(parent, ep: dict, query: dict[str, str], body: dict,
@@ -424,7 +424,8 @@ async def run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_heade
                      execute_child, *, audit_client: str = "") -> tuple[UpstreamResponse, int]:
     """Execute a routed call under `parent`. Returns (the assembled response, total charged).
 
-    Every child leaves its hold OPEN in `pending` (CallContext.deferred_settles) and this call
+    A child that charges nothing releases its hold at once, before the next child reserves. Every
+    child that bills leaves its hold OPEN in `pending` (CallContext.deferred_settles) and this call
     closes all of them once, at the end: settled when the routed call answers (a hit, or a 200
     miss), released when it fails. A routed call that fails charges the caller nothing, even when
     a provider on the way answered and billed treg (owner decision 2026-09-21)."""
@@ -459,6 +460,7 @@ async def _run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_head
         raise ResolutionFailed("catalog_parameter_invalid", status_code=400, detail=f"{ep['id']} expects a JSON object body")
     if not isinstance(given, dict):
         raise ResolutionFailed("catalog_parameter_invalid", status_code=400, detail=f"{ep['id']} expects a JSON object body")
+    parent.route_summary = {"identity": given, "size": len(body_bytes or b"")}
     contract = catalog_store.load().contracts.get(ep["capability"])
     options = RouteOptions.from_headers(
         get_header, int(round(contract.default_max_cost_usd * 1_000_000)) if contract and contract.default_max_cost_usd else None)
@@ -485,8 +487,8 @@ async def _run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_head
                         f"no provider for {ep['id']} can honour every filter you sent for this identity "
                         f"(X-Treg-Route-Strict-Filters): " + "; ".join(f"{d['endpoint_id']} {d['why']}" for d in strict_drop)
                         + ". Send an identity a filter-aware provider accepts, or drop the header to accept a looser answer")})
-    # rank() puts specificity ahead of price, so candidates[0] can cost more than a later
-    # one. Refuse only when none of them fit the ceiling, and name the true minimum.
+    # On a search, rank() puts specificity ahead of price, so candidates[0] can cost more than a
+    # later one. Refuse only when none of them fit the ceiling, and name the true minimum.
     if options.max_cost_micro is not None and all(
             (cand.price_micro or 0) > options.max_cost_micro for cand in plan.candidates):
         cheapest = min(plan.candidates, key=lambda cand: cand.price_micro or 0)
@@ -603,6 +605,7 @@ async def _run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_head
                         **({"dropped": plan.dropped} if plan.dropped else {}),
                     },
                 }
+                _summarize(parent, served_by=cand.endpoint["id"], tried_count=len(tried))
                 _audit_parent(parent, ep, 202, spent, audit_client)
                 return _json(body_out, 202, {
                     "X-Treg-Served-By": cand.endpoint["id"],
@@ -791,10 +794,12 @@ async def _run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_head
                                   **({"verification": _unchecked("no_hit")} if options.verify else {}),
                                   **({"capped": True} if cost_capped else {}),
                                   **({"dropped": plan.dropped} if plan.dropped else {})}}
+            _summarize(parent, hit=False, tried_count=len(tried))
             _audit_parent(parent, ep, 200, spent, audit_client)
             headers = {"X-Treg-Providers-Tried": ",".join(t.provider for t in tried), "X-Treg-Route-Outcome": "miss",
                        **({"X-Treg-Route-Capped": "true"} if cost_capped else {})}
             return _json(body_out, 200, headers), spent
+        _summarize(parent, tried_count=len(tried))
         _audit_parent(parent, ep, 502, 0, audit_client)   # a failed routed call charges nothing
         raise GatewayFailed("route_failed", status_code=502, detail={
             "error": "route_failed", "endpoint_id": ep["id"], "tried": [t.view() for t in tried], "charged_micro": spent,
@@ -851,6 +856,10 @@ async def _run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_head
                           **({"capped": True} if cost_capped else {}),
                           **({"ignored_filters": list(cand.ignored)} if cand.ignored else {}),
                           **({"dropped": plan.dropped} if plan.dropped else {})}}
+    _summarize(parent, served_by=served, tried_count=len(tried), output=output,
+               hit={"hit": True, "weak": True, "miss": False}.get(winner_outcome),
+               check_verdict=(verification or {}).get("verdict")
+               if (verification or {}).get("checked") else None)
     _audit_parent(parent, ep, 200, spent, audit_client)
     return _json(body_out, 200, {"X-Treg-Served-By": served, "X-Treg-Providers-Tried": ",".join(t.provider for t in tried),
                                  **({"X-Treg-Merged-From": ",".join(merged_from)} if merged_from else {}),
@@ -935,6 +944,11 @@ async def _run_check(parent: CallContext, check, output: dict, remaining: int | 
         return {**_unchecked("checker_failed"), "cost_micro": cost}, cost
     word = catalog_results.verdict(ep["id"], response.status, raw)
     return {"verdict": word or "unknown", "checked": True, "served_by": ep["id"], "cost_micro": cost}, cost
+
+
+def _summarize(parent: CallContext, **outcome) -> None:
+    """What the router decided, for the parent's call event (service.py `_routed_event`)."""
+    parent.route_summary = {**(parent.route_summary or {}), **outcome}
 
 
 def _audit_parent(parent: CallContext, ep: dict, status: int, charged: int, client: str) -> None:

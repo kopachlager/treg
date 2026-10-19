@@ -23,7 +23,7 @@ adapters:
     const: {queryParams.email_type: work, queryParams.include_phone: false}
     test_identity: {linkedin_url: "https://www.linkedin.com/in/routing-fixture"}
     out: {email: "profile.work_email[0]"}
-    miss: "at_least(status_code != 200, coalesce(profile.work_email) == null)"
+    miss: "at_least(status_code != 200, coalesce(profile.work_email, []) == [])"
   dropleads.people.email.find:
     accepts: [[first_name, last_name, domain]]
     in: {first_name: body.first_name, last_name: body.last_name, domain: body.company_domain}
@@ -135,6 +135,56 @@ adapters:
     out: {email: data.email, first_name: "split_first(data.name)",
           last_name: "split_last(data.name)", verified: "data.email_status == 'valid'"}
     miss: "data.email == null"
+  sixtyfour.people.email.find.work:
+    accepts: [[full_name, domain], [first_name, last_name, domain], [linkedin_url]]
+    in: {full_name: body.lead.name, domain: body.lead.domain, linkedin_url: body.lead.linkedin_url}
+    in_expr: {body.lead.name: "coalesce(full_name, join(first_name, last_name))"}
+    const: {body.mode: PROFESSIONAL}
+    out: {email: "email[0].[0]", verified: "email[0].[1] == 'OK'"}
+    miss: "email[0].[0] == null"
+
+  # ---- people.email.find.personal ------------------------------------------------------------
+  # Routed cheapest per hit: fiber, aviato, limadata, contactout, sixtyfour. A same-people bench
+  # (30 people, 2026-10-17) kept LeadMagic and Enrichlayer out: fewer of their hits looked like the
+  # person's own address, and the cheaper children above already found the people they found.
+  leadmagic.x.personal-email-finder:
+    route: false
+    accepts: [[linkedin_url]]
+    in:  {linkedin_url: body.profile_url}
+    out: {email: first_personal_email}
+    miss: "first_personal_email == null"
+  fiber-ai.people.contacts.reveal.personal:
+    accepts: [[linkedin_url]]
+    in:  {linkedin_url: body.linkedinUrl}
+    const: {body.enrichmentType: {getWorkEmails: false, getPersonalEmails: true, getPhoneNumbers: false},
+            body.validateEmails: true}
+    out: {email: "output.profile.emails[0].email", verified: "output.profile.emails[0].status == 'valid'"}
+    miss: "coalesce(output.profile.emails, []) == []"
+  aviato.people.email.find.personal:
+    accepts: [[linkedin_url]]
+    in:  {linkedin_url: queryParams.linkedinURL}
+    const: {queryParams.type: personal}
+    out: {email: "emails[0].email"}
+    miss: "coalesce(emails, []) == []"
+  sixtyfour.people.email.find.personal:
+    accepts: [[linkedin_url]]
+    in: {linkedin_url: body.lead.linkedin_url}
+    const: {body.mode: PERSONAL}
+    test_identity: {linkedin_url: "https://www.linkedin.com/in/routing-fixture"}
+    out: {email: "personal_email[0].[0]", verified: "personal_email[0].[1] == 'OK'"}
+    miss: "personal_email[0].[0] == null"
+  limadata.people.email.find.personal:
+    accepts: [[linkedin_url], [email]]
+    in:  {linkedin_url: body.linkedin_url, email: body.work_email}
+    out: {email: "emails[0]"}
+    miss: "coalesce(emails, []) == []"
+  contactout.people.contact.personal:
+    accepts: [[linkedin_url]]
+    in: {linkedin_url: queryParams.profile}
+    const: {queryParams.email_type: personal, queryParams.include_phone: false}
+    test_identity: {linkedin_url: "https://www.linkedin.com/in/routing-fixture"}
+    out: {email: "profile.personal_email[0]"}
+    miss: "at_least(status_code != 200, coalesce(profile.personal_email, []) == [])"
 
   # ---- instagram.user.profile ---------------------------------------------------------------
   # Instagram users come in GraphQL (edge_*.count) or private API (*_count) shape; read both.
@@ -306,7 +356,7 @@ adapters:
     const: {queryParams.email_type: none, queryParams.include_phone: true}
     test_identity: {linkedin_url: "https://www.linkedin.com/in/routing-fixture"}
     out: {phone: "profile.phone[0]", line_type: "'mobile'"}
-    miss: "at_least(status_code != 200, coalesce(profile.phone) == null)"
+    miss: "at_least(status_code != 200, coalesce(profile.phone, []) == [])"
   dropleads.people.phone.find:
     accepts: [[linkedin_url]]
     in: {linkedin_url: body.linkedin_url}
@@ -380,6 +430,13 @@ adapters:
     out: {phone: "coalesce(data.mobile_phone, data.phone_number, data.phones[0].number)",
           line_type: "data.phones[0].type"}
     miss: "coalesce(data.mobile_phone, data.phone_number, data.phones[0].number) == null"
+  sixtyfour.people.phone.find:
+    accepts: [[linkedin_url], [email], [full_name, domain], [first_name, last_name, domain]]
+    in: {linkedin_url: body.lead.linkedin_url, email: body.lead.email,
+         full_name: body.lead.name, domain: body.lead.domain}
+    in_expr: {body.lead.name: "coalesce(full_name, join(first_name, last_name))"}
+    out: {phone: "null_if(phone, '')"}
+    miss: "null_if(phone, '') == null"
 
   tomba.people.phone.verify:
     accepts: [[phone]]
@@ -463,6 +520,11 @@ adapters:
     in:  {email: body.email}
     out: {valid: "email_status == 'valid'", status: email_status}
     miss: "email_status == null"
+  sixtyfour.people.email.verify:
+    accepts: [[email]]
+    in: {email: body.email}
+    out: {valid: "status == 'VALID'", status: status}
+    miss: "status == 'UNKNOWN'"
   tomba.people.email.verify:
     accepts: [[email]]
     in:  {email: queryParams.email}
@@ -587,6 +649,15 @@ adapters:
           title: results.title, company: results.company.name, company_domain: results.company.website_url,
           linkedin_url: results.linkedin_url, location: results.country}
     miss: "status != 'ok'"
+  sixtyfour.people.email.reverse:
+    accepts: [[email]]
+    in: {email: body.lead.email}
+    out: {full_name: "join(reverse_firstname, reverse_lastname)",
+          first_name: reverse_firstname, last_name: reverse_lastname,
+          title: reverse_title, company: reverse_company_name,
+          company_domain: reverse_company_domain,
+          linkedin_url: reverse_linkedin_url, location: reverse_location}
+    miss: "join(reverse_firstname, reverse_lastname) == null"
 
   # ---- instagram.user.posts -----------------------------------------------------------------
   tikhub.instagram.user.posts:
@@ -2464,13 +2535,9 @@ adapters:
   fiber-ai.people.contacts.turbo:
     accepts: [[linkedin_url]]
     in:  {linkedin_url: body.linkedinUrl}
+    const: {body.enrichmentType: {getWorkEmails: true, getPersonalEmails: false, getPhoneNumbers: false}}
     out: {email: "output.profile.emails[0].email", verified: "output.profile.emails[0].status == 'valid'"}
     miss: "output.profile.emails == []"
-  leadmagic.x.personal-email-finder:
-    accepts: [[linkedin_url]]
-    in:  {linkedin_url: body.profile_url}
-    out: {email: first_personal_email}
-    miss: "first_personal_email == null"
 
   findymail.search.reverse-email:
     accepts: [[email]]
@@ -3440,3 +3507,56 @@ adapters:
     in: {video_id: body.video}
     out: {comments: rows}
     miss: "coalesce(rows, []) == []"
+
+  # BlitzAPI shares these lookup and search contracts. Its other routes need a company LinkedIn
+  # URL, a provider-specific cascade, or a result shape that no current contract accepts.
+  blitzapi.people.email.find:
+    accepts: [[linkedin_url]]
+    in: {linkedin_url: body.person_linkedin_url}
+    out: {email: email, verified: "found == true"}
+    miss: "found == false"
+  blitzapi.people.phone.find:
+    accepts: [[linkedin_url]]
+    in: {linkedin_url: body.person_linkedin_url}
+    out: {phone: phone}
+    miss: "found == false"
+  blitzapi.people.enrich:
+    accepts: [[linkedin_url]]
+    in: {linkedin_url: body.person_linkedin_url}
+    out: {full_name: person.full_name, first_name: person.first_name, last_name: person.last_name,
+          title: "person.experiences[0].job_title", company: "person.experiences[0].company_name",
+          company_domain: "person.experiences[0].company_domain", linkedin_url: person.linkedin_url,
+          location: "join(person.location.city, person.location.country_code)"}
+    miss: "found == false"
+  blitzapi.people.email.reverse:
+    accepts: [[email]]
+    in: {email: body.email}
+    out: {full_name: person.full_name, first_name: person.first_name, last_name: person.last_name,
+          title: "person.experiences[0].job_title", company: "person.experiences[0].company_name",
+          company_domain: "person.experiences[0].company_domain", linkedin_url: person.linkedin_url,
+          location: "join(person.location.city, person.location.country_code)"}
+    miss: "found == false"
+  blitzapi.companies.enrich:
+    accepts: [[linkedin_url]]
+    in: {linkedin_url: body.company_linkedin_url}
+    out: {name: company.name, domain: company.domain, website: company.website,
+          description: company.about, industry: company.industry, employees: company.size,
+          founded: company.founded_year, location: "join(company.hq.city, company.hq.country_code)",
+          linkedin_url: company.linkedin_url}
+    miss: "found == false"
+  blitzapi.people.search:
+    accepts: [[title]]
+    in: {title: body.people.job_title.include}
+    in_expr: {body.people.job_title.include: "list(title)",
+              body.people.location.country_code: "list(country)",
+              body.max_results: "at_most(limit, 50)"}
+    out: {people: results, count: total_results, next_cursor: cursor}
+    miss: "results == []"
+  blitzapi.companies.search:
+    accepts: [[name]]
+    in: {name: body.company.name.include}
+    in_expr: {body.company.name.include: "list(name)",
+              body.company.hq.country_code: "list(country)",
+              body.max_results: "at_most(limit, 50)"}
+    out: {companies: results, count: total_results, next_cursor: cursor}
+    miss: "results == []"

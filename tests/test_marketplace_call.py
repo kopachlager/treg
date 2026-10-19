@@ -15,6 +15,7 @@ platform key must never appear in a response, an error, or an audit row.
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ import pytest
 from httpx import AsyncClient
 
 from treg import api as A, audit, oauth_providers
+from treg.infra import org_traffic
 from treg.domain import money as ledger
 from treg.domain.money import settlement as settlement_basis
 from treg.domain.catalog import store as catalog_store
@@ -438,6 +440,14 @@ async def test_method_mismatch_is_a_400_hint(clients: AsyncClient):
     assert "GET" in r.json()["detail"]
 
 
+async def test_a_json_body_to_a_form_endpoint_is_a_400_hint(clients: AsyncClient):
+    """JustOneAPI's WeChat search answers JSON with an opaque 415; the caller hears the fix instead."""
+    await clients.post("/secrets", json={"name": "justoneapi", "value": "K"})
+    r = await clients.post("/call/justoneapi.x.weixin-search-article-v1", json={"keyword": "ai"})
+    assert r.status_code == 400
+    assert "x-www-form-urlencoded" in r.json()["detail"]
+
+
 async def test_provider_name_404_points_at_the_marketplace(clients: AsyncClient):
     """`treg call tikhub /path` (no such tool) keeps failing, but no longer dead-ends."""
     r = await clients.get("/call/tikhub/api/v1/foo")
@@ -473,14 +483,22 @@ def test_path_placeholders_fill_from_query_and_are_consumed():
     assert exc.value.status_code == 400 and "siteUrl" in exc.value.detail
 
 
-async def test_deny_rules_cover_marketplace_calls(clients: AsyncClient):
+async def test_deny_rules_cover_marketplace_calls(clients: AsyncClient, caplog):
     """Policy is evaluated on the RESOLVED upstream — an endpoint-id call can't dodge a host block."""
     await clients.post("/secrets", json={"name": "tikhub", "value": "MKKEY"})
     org_id = (await clients.get("/orgs")).json()[0]["org_id"]
     r = await clients.post(f"/orgs/{org_id}/deny", json={"host": "api.tikhub.io", "note": "no tikhub"})
     assert r.status_code == 200, r.text
-    r = await clients.get(f"/call/{EP}?aweme_id=7")
+    caplog.set_level(logging.INFO, logger=org_traffic.log.name)
+    org_traffic.log.addHandler(caplog.handler)
+    try:
+        r = await clients.get(f"/call/{EP}?aweme_id=7")
+    finally:
+        org_traffic.log.removeHandler(caplog.handler)
     assert r.status_code == 403
+    [line] = [json.loads(m.getMessage().split(" ", 1)[1]) for m in caplog.records
+              if m.name == org_traffic.log.name and m.getMessage().startswith("request ")]
+    assert (line["provider"], line["refused_by"]) == ("tikhub", "policy"), "the request log names the refusal"
 
 
 # ---- tier 4: treg's own key, billed to the org balance ------------------------------------------
@@ -3234,6 +3252,46 @@ def test_icypeas_company_scrape_bills_the_company_rate():
     mk, _, _ = _priced("icypeas.scrape.bulk", None, {**body, "type": "profile"},
                        request_data={"body": {**body, "type": "profile"}})
     assert call_settle._observed_cost_micro(mk, found) == 3 * mk.unit_micro  # 1.5 credits each
+
+
+_ERROR_IN_2XX = [
+    ("justoneapi", "GET", "/call/justoneapi.x.twitter-search-v1?keyword=example&searchType=Top&cursor=0",
+     None, b'{"code":301,"data":null,"message":"COLLECT FAILED, SEND REQUEST AGAIN"}'),
+    ("harvestapi", "GET", "/call/harvestapi.linkedin.user.profile?publicIdentifier=someone-example",
+     None, b'{"data":null,"error":"Too many queued requests (code_22)","status":429}'),
+    ("harvestapi", "GET", "/call/harvestapi.linkedin.user.profile?publicIdentifier=someone-example",
+     None, b'{"data":null,"error":"No active backend servers available.","status":503}'),
+    ("serpstat", "POST", "/call/serpstat.web.backlinks.summary",
+     {"id": "1", "method": "SerpstatBacklinksProcedure.getSummaryV2", "params": {"query": "example.com"}},
+     b'{"id":"1","error":{"code":-32016,"message":"Invalid domain"}}'),
+    ("icypeas", "POST", "/call/icypeas.people.email.find",
+     {"firstname": "Ada", "lastname": "Example", "domainOrCompany": "company.example"},
+     b'{"success":false,"validationErrors":[{"type":"FirstLastMandatoryDiscoveryError"}]}'),
+    ("brightdata", "POST", "/call/brightdata.x.tiktok-profiles?dataset_id=gd_l1villgoiiidt09ci&format=json",
+     [{"url": "https://www.tiktok.com/@someone-example"}], b""),
+]
+
+
+@pytest.mark.parametrize(("provider", "method", "path", "payload", "body"), _ERROR_IN_2XX)
+async def test_an_error_or_empty_2xx_is_not_a_billed_success(
+    clients: AsyncClient, monkeypatch, provider, method, path, payload, body,
+):
+    monkeypatch.setenv(f"TREG_PLATFORM_KEY_{provider.upper().replace('-', '_')}", "SYNTHETIC-KEY")
+    monkeypatch.setenv("TREG_PLATFORM_PROVIDERS", provider)
+    get_settings.cache_clear()
+    monkeypatch.setattr(call_service, "relay", _fake_relay(200, body))
+    try:
+        before = await _balance(clients)
+        response = await clients.request(method, path, json=payload)
+        assert response.status_code == 200, response.text
+        assert response.content == body
+        assert await _balance(clients) == before
+        telemetry = await _telemetry(clients)
+        assert telemetry["cost_estimated_micro"] > 0
+        assert telemetry["cost_observed_micro"] == 0
+        assert telemetry["cost_charged_micro"] == 0
+    finally:
+        get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------------------------

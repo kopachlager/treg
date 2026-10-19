@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError, TimeoutError as PoolTimeoutError
 
 from ... import adsconv, archive
 from ...config import get_settings
+from ...domain.capacity import events as capacity_events
 from ...domain.capacity import marks as capacity_marks
 from ...domain.capacity import overflow_spend as overflow_spend_ledger
 from ...domain.capacity import signatures as capacity_signatures
@@ -120,7 +121,7 @@ def _brightdata_record_count(body: bytes) -> int | None:
         return None
     text = body.decode("utf-8", "replace").strip()
     if not text:
-        return None
+        return 0
     try:
         doc = json.loads(text)
     except ValueError:
@@ -494,6 +495,16 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
     catalog = catalog_store.load()
     ep = catalog.by_id.get(mk.endpoint_id)
     cost = catalog.cost_view(ep.get("cost"), provider) if ep else None
+    if cost and cost.get("settle") == "quantity":
+        # The caller bought `quantity` units (a budget, a block of checks): the charge is what
+        # was bought, held exactly at reserve. A provider's own report for the call (often 0, as
+        # adding room is free on its side) must not turn a purchase into a free one. When the row
+        # names `quantity.applied`, the provider's answer must say the units were added: a retry
+        # it recognised (same purchase id, nothing added) settles at 0.
+        applied = (cost.get("quantity") or {}).get("applied")
+        if applied and _dig(_usage_document(body), applied) is not True:
+            return 0
+        return mk.estimate_micro
     if cost and cost.get("settle") == "base" and cost.get("usd") is not None:
         # The reserve can include documented request riders while the observed settlement remains
         # the catalog base. Aviato simple search earned this rule from two multi-row live probes:
@@ -514,13 +525,13 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
             charged_credits = -1
         if math.isfinite(charged_credits) and charged_credits >= 0 and rate:
             return _usd_to_micro(charged_credits * rate)
-    if not body:
-        return 0 if provider == "contactout" else None
     if provider == "brightdata" and mk.cost_type == "per_result" and mk.unit_micro > 0:
         # DERIVED by counting records — Bright Data's bill is per record delivered and the body is
         # the only place that number exists (see _brightdata_record_count for the shapes).
         n = _brightdata_record_count(body)
         return None if n is None else n * mk.unit_micro
+    if not body:
+        return 0 if provider == "contactout" else None
     try:
         doc = json.loads(body)
     except (ValueError, UnicodeDecodeError):
@@ -575,6 +586,9 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
         return None
     if provider == "companyenrich" and mk.cost_type == "per_result" and mk.unit_micro > 0:
         return _rows_billed_micro(mk, ep, _companyenrich_record_count(mk.endpoint_id, doc))
+    if (provider == "icypeas" and isinstance(doc, dict) and doc.get("success") is False
+            and not doc.get("item") and not doc.get("file")):
+        return 0
     if provider == "icypeas" and mk.cost_type == "per_result" and mk.unit_micro > 0:
         body = mk.request_data.get("body") if isinstance(mk.request_data, dict) else None
         # The scrape row carries the dearer profile rate; a company batch is 0.5 credit a hit.
@@ -585,6 +599,8 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
             return _rows_billed_micro(mk, ep, search_rows)
         return _rows_billed_micro(mk, ep, _icypeas_bulk_found_count(mk.endpoint_id, doc),
                                   Decimal("0.5") if company else None)
+    if provider == "serpstat" and isinstance(doc, dict) and doc.get("error"):
+        return 0
     if provider == "serpstat" and mk.cost_type == "per_result" and mk.unit_micro > 0:
         return _rows_billed_micro(mk, ep, _serpstat_result_count(doc))
     if provider == "spyfu" and mk.cost_type == "per_result" and mk.unit_micro > 0:
@@ -626,6 +642,10 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
                             Decimal("1"), rounding=ROUND_HALF_UP))
             except (InvalidOperation, ValueError, OverflowError):
                 pass
+        status = doc.get("status")
+        if amount is None and type(status) is int and status >= 400:
+            # HarvestAPI answers a full queue (429) or no backend (503) as a 200 without `cost`.
+            return 0
         # Missing or invalid charge evidence leaves the normal miss/base rules in force.
     if provider == "sumble":
         credits = doc.get("credits_used")
@@ -830,24 +850,18 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
     # (found live by the first routed waterfall, 2026-08-28: three of five misses were charged).
     if mk.cost_type == "per_success" and isinstance(doc, dict):
         cat = catalog_store.load()
+        if (rule := (cat.by_id.get(mk.endpoint_id) or {}).get("expect")):
+            try:
+                if _dig(doc, rule["json_path"]) != rule.get("equals"):
+                    return 0
+            except Exception:  # noqa: BLE001
+                pass
         adapter = cat.adapters.get(mk.endpoint_id)
         if adapter is not None and adapter.verified:
             try:
                 if adapter.is_miss(doc):
                     return 0
             except Exception:  # noqa: BLE001 — a predicate that cannot decide settles at the estimate
-                pass
-        # No adapter? Most `.x.` endpoints have none — 1330 of 1517 per_success rows, concentrated
-        # in the scrapers whose failure mode IS an HTTP 200 carrying an error code. Those providers
-        # publish a success rule and the catalog already records it as `expect`; it was read only by
-        # catalog_verify. Live 2026-08-29: justoneapi answered `{"code":301,"message":"COLLECT
-        # FAILED"}` — free on the vendor's own terms ("only a code-0 response is billed") — and treg
-        # settled $0.0295 against the caller.
-        elif (rule := (cat.by_id.get(mk.endpoint_id) or {}).get("expect")):
-            try:
-                if _dig(doc, rule["json_path"]) != rule.get("equals"):
-                    return 0
-            except Exception:  # noqa: BLE001 — same rule as above: undecidable settles at the estimate
                 pass
     return None
 
@@ -1204,12 +1218,19 @@ async def _platform_settle(
         actual = actual * repeat_percent // 100
     call_id, mk.call_id = mk.call_id, None  # closing is once-only, even if two paths try
     charged = 0
-    if (mk.deferred is not None and overflow_spend is None and observed_override is None
+    if mk.deferred is not None and billable and actual == 0:
+        # A routed child the provider reported free (a miss on a per-success rate card): there is
+        # nothing for the parent to decide, so it is released below like any unbilled child.
+        billable, reason = False, reason or "free_answer"
+    if (mk.deferred is not None and billable and overflow_spend is None and observed_override is None
             and status_code is not None):
         # A routed child: the parent decides whether the caller pays (a routed call that fails
         # charges nothing). Leave the hold open, hand the parent what this settle WOULD do, and
         # tell the child it is finished. The parent closes it exactly once (`close_deferred`);
         # a crash in between leaves the hold to the reaper, which releases in the caller's favour.
+        # A child that charges nothing (a free miss, an error) is released below, NOW: the parent
+        # would close it at zero anyway, and an open hold made the next child's reserve answer a
+        # false 402 on a balance that covers each child in turn.
         mk.deferred.append(DeferredSettle(
             call_id=call_id, billable=billable, actual_micro=actual, archive_use=archive_use,
             payer_org_id=mk.payer_org_id, reserved_micro=mk.reserved_micro,
@@ -1436,30 +1457,28 @@ async def _note_capacity_signal(mk: MarketplaceCall, status_code: int, headers, 
         signal = capacity_signatures.classify(mk.provider, status_code, headers, body[:4096])
         if signal is None:
             return None
+        where = {"provider": mk.provider, "slot": keyslots.capacity_slot(mk.key_slot),
+                 "endpoint_id": mk.endpoint_id, "kind": signal.kind, "status": status_code}
         if capacity_signatures.is_exhausting(signal):
             lock = await capacity_marks.strike(
                 mk.provider, endpoint_id=mk.endpoint_id, kind=signal.kind,
                 resets_at=signal.resets_at, slot=keyslots.capacity_slot(mk.key_slot),
                 note=f"{signal.kind} signature on {mk.endpoint_id}: {signal.detail[:80]}")
             capacity_view.invalidate()
-            if lock is not None and lock.is_active():
-                logging.getLogger("treg.capacity").warning(
-                    "platform account locked: %s until %s (%s on %s)",
-                    lock.key, lock.until, signal.kind, mk.endpoint_id)
-            else:
-                logging.getLogger("treg.capacity").info(
-                    "capacity strike on %s (%s on %s)", mk.provider, signal.kind, mk.endpoint_id)
-        elif signal.kind == "edge_block":  # not our account: no mark, but worth a warning
-            logging.getLogger("treg.capacity").warning(
-                "edge block on %s (%s): the vendor's CDN answered, not the vendor",
-                mk.provider, mk.endpoint_id)
+            # A signature meeting a lock already in place says nothing new: the request log
+            # carries each refused or relayed call, so only the transitions are events.
+            if lock is not None and lock.opened:
+                capacity_events.emit("lock_opened", **where, key=lock.key, lock_id=lock.lock_id,
+                                     strikes=lock.strikes, first_signal_at=lock.first_signal_at,
+                                     opened_at=lock.opened_at, until=lock.until)
+            elif lock is not None and not lock.is_active():
+                capacity_events.emit("strike", **where, key=lock.key, strikes=lock.strikes)
+        elif signal.kind == "edge_block":  # not our account: no mark, but worth a look
+            capacity_events.emit("edge_block", **where)
         elif signal.kind == "unrecorded":  # a vendor phrase the table lacks: for a person to record
-            logging.getLogger("treg.capacity").warning(
-                "unrecorded capacity-looking %d from %s on %s: body says %r",
-                status_code, mk.provider, mk.endpoint_id, signal.detail)
+            capacity_events.emit("unrecorded", **where, phrase=signal.detail)
         else:
-            logging.getLogger("treg.capacity").info(
-                "rate signal on %s: %s retry_after=%s", mk.provider, signal.kind, signal.retry_after_s)
+            capacity_events.emit("rate", **where, retry_after_s=signal.retry_after_s)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 — the caller already has the provider's answer; a mark is a hint
@@ -1484,14 +1503,16 @@ async def _note_capacity_recovery(mk: MarketplaceCall) -> None:
             if await capacity_marks.clear(lock.key, lock_id=mk.probe_lock_id):
                 cleared = True
                 if lock.is_active():
-                    logging.getLogger("treg.capacity").warning(
-                        "platform account recovered: %s (probe on %s)", lock.key, mk.endpoint_id)
+                    capacity_events.emit(
+                        "lock_cleared", provider=mk.provider, slot=keyslots.capacity_slot(mk.key_slot),
+                        endpoint_id=mk.endpoint_id, key=lock.key, lock_id=lock.lock_id, via="probe",
+                        locked_s=int((_utcnow_naive() - (lock.opened_at or lock.first_signal_at))
+                                     .total_seconds()))
         if ((mk.probe_lock_id or "").startswith(capacity_marks.SWEEP_PROBE)
                 and await capacity_marks.clear_sweep_state(mk.provider, probe_id=mk.probe_lock_id)):
             cleared = True
-            logging.getLogger("treg.capacity").warning(
-                "platform account recovered: %s (probe on %s lifted the sweep's reading)",
-                mk.provider, mk.endpoint_id)
+            capacity_events.emit("lock_cleared", provider=mk.provider, slot=None,
+                                 endpoint_id=mk.endpoint_id, key=mk.provider, via="sweep_probe")
         if cleared:
             capacity_view.invalidate()
     except asyncio.CancelledError:

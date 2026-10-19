@@ -93,6 +93,10 @@ related:
 
 # Data model
 
+Revision `0077` adds the empty `TeamDatabase` and `TableDoc` control-plane tables for
+[Workbench table storage](workbench-storage.md#management-metadata). It does not provision remote
+databases or business rows. Existing tables and data are unchanged by the migration.
+
 Migration `0043` adds `ProviderResource`, the durable organization-owned counterpart to the existing
 async ownership rows. It stores provider, resource kind, upstream id, display name, creator, source
 call, lifecycle state and timestamps. `(provider, resource_kind, upstream_id)` is globally unique so
@@ -1002,3 +1006,14 @@ length-capped click fields, and `created_at`/`updated_at` use naive UTC. Authent
 submit observations of proven emails; cookie-less signup uses observations from the last 90 days.
 Signup deletes the row once its team holds the click, and `treg-worker admin purge-ad-clicks`
 deletes rows past 90 days. No analytics or audit emission is involved. See [ads conversions](ads-conversions.md).
+
+## Showcase leaderboard and pictures
+
+Additive revision `0076`: `showcaseapp` (an entry: status, live fields, consent flags, the usage
+source, the pending proposal as JSON), `showcaseappevent` (append-only history, unique per entry
+and version), `showcaseappkey` (an API key whose calls are an entry's activity; one entry per key),
+`showcaseweek` (one row per source - a team, `api_key_id` 0, or one key - per UTC week),
+`showcasecursor` (the last call id counted into a source's weeks) and `showcasevote` (unique per
+entry and person), all written only by `application.showcase`; the entry's children cascade with
+it, the two activity tables are keyed by team and key, and team deletion removes all of them. `org.avatar_key` and `user.avatar_key` name a picture in
+the public media bucket and are written only by `application.images`. See [showcase](showcase.md).

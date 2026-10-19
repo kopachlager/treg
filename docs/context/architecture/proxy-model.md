@@ -417,7 +417,9 @@ reserve, relay faithfulness, capacity, overflow, audit, cancellation - applies p
 unchanged. **Settle does not** apply straight: each child's `MarketplaceCall.deferred` points at
 the parent's `CallContext.deferred_settles` list, so `_platform_settle` appends a `DeferredSettle`
 (call id, billable, the amount it would have charged, its archive-use marker) and leaves the hold
-open instead of closing it. The parent - not each child - decides whether the caller pays, and
+open instead of closing it. Only a child that would charge something defers: one that is not
+billable or settles at a provider-reported zero releases at once, so its hold never blocks the next
+child's reserve. The parent - not each child - decides whether the caller pays, and
 closes every child's hold exactly once with `settle.close_deferred(charge=…)`: `charge=True` settles
 each billable child as its own settle would have, `charge=False` releases all of them, because a
 routed call that fails charges the caller nothing. A crash before `close_deferred` runs leaves the
@@ -527,7 +529,8 @@ and never consult the view: an org's own key running dry is the org's own answer
 unchanged. The vendor's 402 on THIS call is also relayed unchanged - the protection is for the
 next caller.
 An `unrecorded` signal - a 4xx no row matched whose body still names credits/quota/balance -
-is neither a strike nor a mark: it logs `unrecorded capacity-looking …` with the phrase and rides
+is neither a strike nor a mark: it emits a `capacity` `unrecorded` event with the phrase
+(`ops/capacity.md`) and rides
 `tool_called` as `capacity_signal=unrecorded`, the tripwire for a vendor whose out-of-credit answer is
 not in the table yet (how Apollo's 422 went unseen on 2026-09-01).
 

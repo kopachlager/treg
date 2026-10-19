@@ -238,6 +238,27 @@ assigned to any organization is never sent through the public lookup. BYOK never
 policy. Fish remains deployment-disabled until live management-price, shared-account permission,
 and commercial checks pass.
 
+`team_label` covers provider objects that outlive a call and are kept per label (monitors,
+schedules, feeds) on treg's one shared account. It lists request fields (body, header, query or
+path) that must carry the calling team's own label, `resolve.team_label(org_id)`: stable, one per
+team. `_enforce_team_label` checks it on the shared key only, before reserve; the caller sends it,
+so the relay stays faithful, and a missing or other team's label is a 400 naming the expected
+value. A team's own key never applies it.
+
+`caller_email` lists request fields (nested body paths allowed, such as `notify.email`) that, when
+sent on the shared key, may only carry the caller's own verified email, compared case-insensitively;
+another address is a 400 before reserve, and leaving the field out is fine. `_enforce_caller_email`
+checks without rewriting, so a shared provider account sends alerts only to the person who asked.
+
+`cost.quantity` prices a call by a whole number the caller chooses (a budget of provider credits):
+`{field, max}` names a declared integer body or query field and its ceiling. A missing or
+out-of-range value is a 400 before reserve, the hold is `quantity x price`, and `settle: quantity`
+settles exactly that on success, ignoring any provider-reported charge (adding room is often free on
+the provider's side and reported as 0). An optional `applied` JSON path names the answer field that
+says the units were added; when it is not `true` (a retry the provider recognised by its purchase
+id) the call settles at 0. The validator requires it on a `per_success` price with no
+`reported_charge`. Together they let a team buy a budget for background work under its own label.
+
 ## Authorization metadata
 
 An endpoint can declare `authorization_method`, ordered `authorization_methods`, method-specific
@@ -1172,8 +1193,9 @@ billable, the recovery report): architecture/money.md.
 For synchronous providers that disclose the exact charge in the response, a paid cost may declare
 `reported_charge: {path: ..., unit: usd}` or use `unit: credit` when the provider has an `fx.yaml`
 credit rate. The catalog estimate still reserves a safe
-ceiling. A finite nonnegative response value settles the call at that amount; missing, invalid, or
-non-finite evidence falls back to the normal estimate/miss rules. `reported_charge` is generic
+ceiling. A finite nonnegative response value settles the call at that amount; a missing value in a
+body whose own `status` is 400 or more settles at zero; other missing, invalid, or non-finite
+evidence falls back to the normal estimate/miss rules. `reported_charge` is generic
 catalog metadata, not a provider-specific billing branch, and cannot be combined with `cost.settle`.
 
 `spooled_response: true` marks a synchronous endpoint whose answer inlines media too large for
@@ -1654,6 +1676,9 @@ needing an async crawl id).
 A provider whose POST routes take `application/x-www-form-urlencoded` may read the credential from
 the form body and reject a query token with a misleading auth error (Just One API). For
 `bodyType: form` entries `catalog_verify.py` and `catalog_verify_extended.py` move it into the body.
+`bodyType: form` means form only: a JSON body sent to such a row gets a 400 naming the fix
+before any upstream trip (nothing is rewritten), and the MCP `call` tool form-encodes an object
+body for it. A row whose upstream also takes JSON declares `json`.
 A provider's other quirks live on its rows as `note`, `enum` or `example`, never here.
 
 ## Choosing between providers (`domain/catalog/stats.py`)
@@ -1836,17 +1861,19 @@ Five rules worth keeping:
   `means` on the tools that declare it. Each scrape adapter's `miss` predicate reads that
   provider's own text field, so an empty page is a miss for every provider, not a hit.
 - **A failed `expect` rule is a miss.** A routed child's 2xx whose body fails the endpoint's own
-  `expect` success rule is a `miss` whatever the adapter reads off it, and keeps the charge the
-  provider reported.
+  `expect` success rule is a `miss` whatever the adapter reads off it; on a `per_success` row it is
+  free unless the provider reported a charge.
 - **`miss` semantics ride on the endpoint.** Some providers answer "asked and answered: no result"
   with an error status (PDL 404s a person it has no record of; Hunter's combined-find does the
   same). Endpoints with evidenced miss behaviour carry a `miss: {status, means}` block in their
   YAML, surfaced through `endpoint_view` — so an agent reads "404 = no match, don't retry" instead
   of treating an expected empty answer as a failure. Only annotate what the wire has demonstrated.
-  **The router and the arena read the same block through one function**
+  **The router, the arena and the hit verdict read the same block through one function**
   (`routing.contracts.declared_miss`, wrapped by `route._declared_miss` and called by
-  `arena.classify`): a child answering the declared 4xx is a MISS — the waterfall goes on and a
-  fully-missed call ends as a 200 miss, never `route_failed`. Where one status carries both a
+  `arena.classify` and `results.classify`): a child answering the declared 4xx is a MISS — the
+  waterfall goes on and a fully-missed call ends as a 200 miss, never `route_failed` — and any
+  call answering it records `CallRecord.hit = False` (state `empty`, reason `declared_miss`).
+  Without that, a provider that errors its misses recorded only its hits and read 100%. Where one status carries both a
   miss and a fault, `when:` adds a body predicate in the adapter expression language, evaluated
   only on a JSON-object body (`catalog_validate.py` rejects a `when` that is not a comparison or
   call, since a misspelt path would evaluate False forever and silently revert the endpoint to
@@ -2069,7 +2096,9 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   never provider names — `{full_name, domain}`, `{first_name, last_name, domain}`,
   `{linkedin_url}`), `derive` rules so the two name shapes match the same adapters, a small
   *output* core (`email` required; `confidence`, names, `verified` optional) and `miss` in
-  canonical terms. `raw` — the winning provider's body — is always returned and never documented
+  canonical terms. An output field may say where it lands in a call event (`analytics: key |
+  value | skip`, default skip; [call-events.md](call-events.md)); the public contract view drops
+  it. `raw` — the winning provider's body — is always returned and never documented
   as stable. `advice_unverified` (email and phone finds, and `people.search`) is one sentence the
   router attaches as `_treg.advice` to a hit whose `verified` is not true — a found contact is not
   a confirmed one (Hunter's `accept_all`, LeadMagic's personal finder, every phone provider), and a
@@ -2220,7 +2249,10 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   under a 20000 envelope). A
   MISS tries the next candidate — the waterfall is ON by default (decided
   2026-08-28: the endpoint's job is to find the thing, and misses on the per-success children are
-  free); `X-Treg-Route-Waterfall: 0` stops at the first miss. **A child never settles its own
+  free); `X-Treg-Route-Waterfall: 0` stops at the first miss. A child that charges nothing (not
+  billable, or a provider-reported zero such as a free miss) releases its hold at once, before the
+  next child reserves: holding it to the end made a balance that covers each child in turn answer
+  a false 402 mid-waterfall. **A billed child never settles its own
   hold**: it leaves it open in the parent's `deferred_settles` list (`settle.DeferredSettle`) with
   the amount its settle would charge, and `run_routed` closes every one exactly once at the end
   (`settle.close_deferred`, one transaction): settled at that real price when the routed call
@@ -2233,8 +2265,8 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   that would breach it is `skipped`). Before any child runs, the route returns 402
   `route_max_cost` (`cheapest_micro`, `plan`, `charged_micro: 0`) only when no candidate's
   `price_micro` fits the ceiling, and that detail names the minimum price rather than the
-  first-ranked candidate: `rank` puts specificity ahead of price, so a dearer provider can be
-  first while a later one still fits. Quota-row quotes scale with the requested row count, just
+  first-ranked candidate: on a search `rank` puts specificity ahead of price, so a dearer
+  provider can be first while a later one still fits. Quota-row quotes scale with the requested row count, just
   like per-result quotes. Each child also receives the remaining ceiling after actual earlier
   charges; the shared reservation gate checks the resolved estimate including margin, even when
   the advisory quote was too low or the child uses overflow. A budget refusal skips that candidate
@@ -2258,7 +2290,8 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   and charge; the existing async worker owns eventual settlement. Only declared terminal misses and
   failures may continue under the normal bounded fallback rules.
 - **Hit rate** — `CallRecord.hit` (nullable, alembic `0009`, last column) is the adapter's verdict
-  for a completed result. An accepted async submission leaves it NULL; the terminal finalizer
+  for a completed result: a 2xx the adapter judges, or the endpoint's declared `miss:` status
+  (False); any other error status stays NULL. An accepted async submission leaves it NULL; the terminal finalizer
   classifies the finished body and queues an audit update for the originating row, including a
   routed child. The poll response does not wait for that best-effort write. A
   confirmed terminal failure counts as a miss; pending and timed-out jobs remain undecided. Its
@@ -2289,6 +2322,12 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   goes to a title-aware search, not a free domain-only one that would answer the whole company.
   Only caller-supplied keys count (`rank(given=…)`), never keys reached through `derive`. Price
   decides among equals.
+  **Not on a one-subject lookup** (contract `one_subject: true`: `people.email.find`, `people.email.find.personal`,
+  `people.phone.find`): every identity variant names the same person, so reading more of the
+  caller's keys does not change the question. There expected cost per hit ranks first and
+  specificity only breaks ties; specificity first had sent `{linkedin_url, full_name, domain}`
+  phone finds to a name+domain child at roughly 500 times the price of LinkedIn children that hit
+  on the same people.
 - **Ranking, dropped filters (2026-08-29)**: a candidate whose adapter cannot express a filter the
   caller SENT ranks below every candidate that can — `len(candidate.ignored)` sits in `rank()`'s key
   between specificity and price. It answers a LOOSER question, and a non-empty answer to the looser

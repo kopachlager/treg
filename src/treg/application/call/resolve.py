@@ -515,6 +515,90 @@ def _body_text_utf8_bytes(body: bytes) -> int:
     return 1
 
 
+def team_label(org_id: int) -> str:
+    """The calling team's label on a shared provider account: stable, one per team, the same for
+    every provider. A row's `team_label` fields must carry it on treg's key (see
+    `_enforce_team_label`), so what the provider keeps under a label is one team's alone."""
+    return "team-" + hashlib.sha256(f"treg-team:{org_id}".encode()).hexdigest()[:16]
+
+
+def _request_value(path: str, body: bytes, headers, query) -> list[str]:
+    """Every value the request supplies at a dotted catalog path (`body.x`, `headers.x`,
+    `queryParams.x`, `pathParams.x`). Path params arrive as query params before substitution."""
+    where, name = path.split(".", 1)
+    if where == "headers":
+        return _request_header_values(headers, name.lower())
+    if where in ("queryParams", "pathParams"):
+        return [str(v) for k, v in query.multi_items() if k == name] if query is not None else []
+    value: object = _json_object(body) if body else {}
+    for part in name.split("."):  # body paths may be nested: `notify.email`
+        value = value.get(part) if isinstance(value, dict) else None
+    return [] if value is None else [value if isinstance(value, str) else json.dumps(value)]
+
+
+def _enforce_team_label(ep: dict, org_id: int, body: bytes, headers=None, query=None) -> None:
+    """On treg's shared key, every `team_label` field must name the caller's own team, exactly
+    once. The caller sends it, so the relay stays faithful; a missing or other team's label is a
+    400 that names the expected value."""
+    expected = team_label(org_id)
+    for path in ep.get("team_label") or ():
+        if _request_value(path, body, headers, query) != [expected]:
+            raise ResolutionFailed(
+                "catalog_parameter_invalid", status_code=400, detail={
+                    "error": "catalog_parameter_invalid", "endpoint_id": ep["id"],
+                    "parameter": path, "expected": expected,
+                    "message": f"{ep['id']} on treg's key requires {path} = {expected}, "
+                               "your team's label: send it exactly",
+                },
+            )
+
+
+def _enforce_caller_email(ep: dict, email: str, body: bytes, headers=None, query=None) -> None:
+    """On treg's shared key, a `caller_email` field the caller sends may only be its own verified
+    email, so a shared provider account never sends mail to someone else. Absent is fine; the
+    caller sends it, so the relay stays faithful."""
+    own = (email or "").strip().lower()
+    for path in ep.get("caller_email") or ():
+        values = _request_value(path, body, headers, query)
+        if values and [str(v).strip().lower() for v in values] != [own]:
+            raise ResolutionFailed(
+                "catalog_parameter_invalid", status_code=400, detail={
+                    "error": "catalog_parameter_invalid", "endpoint_id": ep["id"],
+                    "parameter": path, "expected": email,
+                    "message": f"{ep['id']} on treg's key sends {path} only to your own email, "
+                               f"{email}; leave it out to get no email",
+                },
+            )
+
+
+def _request_quantity(cost: dict, body: bytes, query) -> int | None:
+    """The quantity a `cost.quantity` row prices by: a positive integer the caller chose, at most
+    the declared maximum. None when absent or not a whole number in range."""
+    rule = cost.get("quantity") if isinstance(cost.get("quantity"), dict) else None
+    if not rule:
+        return None
+    values = _request_value(str(rule.get("field")), body, None, query)
+    if len(values) != 1 or not str(values[0]).strip().isdigit():
+        return None
+    n = int(str(values[0]).strip())
+    return n if 1 <= n <= int(rule.get("max") or 0) else None
+
+
+def _enforce_request_quantity(ep: dict, cost: dict, body: bytes, query) -> None:
+    """A row priced by a quantity the caller chooses refuses a missing or out-of-range one before
+    anything is held, so the hold and the charge are exactly what the caller asked for."""
+    rule = cost.get("quantity") if isinstance(cost.get("quantity"), dict) else None
+    if rule and _request_quantity(cost, body, query) is None:
+        raise ResolutionFailed(
+            "catalog_parameter_invalid", status_code=400, detail={
+                "error": "catalog_parameter_invalid", "endpoint_id": ep["id"],
+                "parameter": rule.get("field"),
+                "message": f"{ep['id']} needs {rule.get('field')}: a whole number from 1 to "
+                           f"{rule.get('max')}",
+            },
+        )
+
+
 def _platform_estimate_micro(cost: dict, query, body: bytes = b"") -> int:
     """What one call is expected to cost the platform, in RAW micro-USD (no margin — ledger.reserve
     applies that). Rounds UP: a fraction of a micro-dollar is not representable and must not round to
@@ -523,7 +607,10 @@ def _platform_estimate_micro(cost: dict, query, body: bytes = b"") -> int:
     if usd is None:
         return 0
     n = 1
-    if cost.get("unit") == "character":
+    if isinstance(cost.get("quantity"), dict):
+        # A quantity the caller chose (a budget): validated before reserve, so the hold is exact.
+        n = _request_quantity(cost, body, query) or 1
+    elif cost.get("unit") == "character":
         n = _body_text_characters(body)
     elif cost.get("unit") == "utf8_byte":
         n = _body_text_utf8_bytes(body)
@@ -2086,6 +2173,14 @@ async def _resolve_marketplace_call(
         raise ResolutionFailed(
             "method_mismatch", status_code=400,
             detail=f"{ep['id']} is {ep['method']} — add --method {ep['method']}")
+    # A form-only upstream answers a JSON body with an opaque 415; refuse it here with the fix
+    # instead. Nothing is rewritten, and a row whose upstream also takes JSON declares `json`.
+    if (has_body and (ep.get("input") or {}).get("bodyType") == "form"
+            and "json" in _request_headers(request_headers).get("content-type", "").lower()):
+        raise ResolutionFailed(
+            "catalog_parameter_invalid", status_code=400,
+            detail=f"{ep['id']} takes an application/x-www-form-urlencoded body, not JSON: send "
+                   "the same fields as key=value&key=value with that Content-Type")
 
     try:
         methods = connection_authorization.select_endpoint_methods(
@@ -2257,6 +2352,9 @@ async def _resolve_marketplace_call(
     resource_owners: tuple[str | None, ...] = ()
     if cost is not None:
         _enforce_platform_request(ep, body, request_headers, query)
+        _enforce_team_label(ep, caller.org_id, body, request_headers, query)
+        _enforce_caller_email(ep, caller.email, body, request_headers, query)
+        _enforce_request_quantity(ep, cost, body, query)
         if service == "sumble":
             from . import sumble
             sumble.enforce(ep, _strict_json_object(body, ep["id"]) if has_body else {}, query)

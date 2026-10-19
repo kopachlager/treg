@@ -21,7 +21,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import BaseRoute, Mount
 
-from . import adsconv, analytics, archive, audit
+from . import adsconv, analytics, archive, audit, call_events
 from .application.call import route as routed_call
 from .application import arena, find_index
 from .application.onboard import first_run
@@ -170,6 +170,7 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/skills/ugc/SKILL.md', ('GET',), 'make_ugc_skill_md'),
     ('/skills/lead-signals/SKILL.md', ('GET',), 'lead_signals_skill_md'),
     ('/skills/web-access/SKILL.md', ('GET',), 'web_access_skill_md'),
+    ('/skills/recruit/SKILL.md', ('GET',), 'recruit_skill_md'),
     ('/skills/jev-memory/SKILL.md', ('GET',), 'jev_memory_skill_md'),
     ('/feedback.md', ('GET',), 'feedback_md'),
     ('/favicon.ico', ('GET',), 'favicon'),
@@ -178,6 +179,7 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/legal.css', ('GET',), 'legal_css'),
     ('/terms', ('GET',), 'terms_page'),
     ('/privacy', ('GET',), 'privacy_page'),
+    ('/sheets', ('GET',), 'sheets_page'),
     ('/connectors/claude', ('GET',), 'claude_connector_page'),
     ('/adtrack.js', ('GET',), 'adtrack_js'),
     ('/captcha.js', ('GET',), 'captcha_js'),
@@ -192,10 +194,38 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/astra', ('GET',), 'astra_page'),
     ('/gpt6', ('GET',), 'gpt6_page'),
     ('/ugc', ('GET',), 'ugc_page'),
+    ('/aeo', ('GET',), 'aeo_page'),
     ('/showcase', ('GET',), 'showcase_page'),
+    ('/showcase/leaderboard', ('GET',), 'showcase_leaderboard'),
+    ('/showcase/votes/me', ('GET',), 'showcase_my_votes'),
+    ('/showcase/vote', ('POST',), 'showcase_vote'),
+    ('/showcase/my-teams', ('GET',), 'showcase_my_teams'),
+    ('/showcase/teams/{org_id}/apps', ('GET',), 'showcase_team_apps'),
+    ('/showcase/teams/{org_id}/apps', ('POST',), 'showcase_apply'),
+    ('/showcase/apps/{app_id}', ('PATCH',), 'showcase_edit'),
+    ('/showcase/apps/{app_id}', ('DELETE',), 'showcase_withdraw'),
+    ('/showcase/teams/{org_id}/keys', ('GET',), 'showcase_team_keys'),
+    ('/showcase/apps/{app_id}/usage', ('PUT',), 'showcase_set_usage'),
+    ('/showcase/apps/{app_id}/remove', ('POST',), 'showcase_remove'),
+    ('/admin/showcase/apps', ('GET',), 'staff_queue'),
+    ('/admin/showcase/apps/{app_id}', ('GET',), 'staff_app'),
+    ('/admin/showcase/apps/{app_id}/approve', ('POST',), 'staff_approve'),
+    ('/admin/showcase/apps/{app_id}/reject', ('POST',), 'staff_reject'),
+    ('/admin/showcase/apps/{app_id}/hide', ('POST',), 'staff_hide'),
+    ('/admin/showcase/apps/{app_id}', ('PATCH',), 'staff_edit'),
+    ('/admin/showcase/teams/{org_id}/apps', ('POST',), 'staff_create'),
+    ('/admin/showcase/teams/{org_id}', ('GET',), 'staff_team'),
+    ('/admin/images/{kind}', ('POST',), 'staff_upload'),
+    ('/admin/images/staging/{key:path}', ('GET',), 'staff_staged_image'),
+    ('/images/{kind}', ('POST',), 'upload_image'),
+    ('/images/staging/{key:path}', ('GET',), 'staged_image'),
+    ('/media-files/{key:path}', ('GET',), 'public_image'),
+    ('/me/avatar', ('PUT',), 'set_my_avatar'),
+    ('/orgs/{org_id}/avatar', ('PUT',), 'set_team_avatar'),
     ('/people-search', ('GET',), 'people_search_page'),
     ('/start', ('GET',), 'start_page'),
     ('/leads-signals', ('GET',), 'leads_signals_page'),
+    ('/recruit', ('GET',), 'recruit_page'),
     ('/web-access', ('GET',), 'web_access_page'),
     ('/gtm-engineering', ('GET',), 'gtm_engineering_page'),
     ('/gtm-engineering.md', ('GET',), 'gtm_engineering_md'),
@@ -216,6 +246,7 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/.well-known/skills/make-ugc/SKILL.md', ('GET',), 'well_known_make_ugc_md'),
     ('/.well-known/skills/lead-signals/SKILL.md', ('GET',), 'well_known_lead_signals_md'),
     ('/.well-known/skills/web-access/SKILL.md', ('GET',), 'well_known_web_access_md'),
+    ('/.well-known/skills/recruit/SKILL.md', ('GET',), 'well_known_recruit_md'),
     ('/connect-demo', ('GET',), 'connect_demo_page'),
     ('/connect-demo/callback', ('GET',), 'connect_demo_callback'),
     ('/help', ('GET',), 'support_page'),
@@ -359,6 +390,7 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/admin/hub/updates/{tool_id}', ('POST',), 'admin_hub_update_decide'),
     ('/admin/calls', ('GET',), 'admin_calls'),
     ('/admin/share', ('GET',), 'admin_share'),
+    ('/admin/daily', ('GET',), 'admin_daily'),
     ('/admin/errors', ('GET',), 'admin_errors'),
     ('/admin/health', ('GET',), 'admin_health'),
     ('/admin/kv', ('GET',), 'admin_kv'),
@@ -766,6 +798,7 @@ def _lifespan(role: AppRole):
                     # left those events queued behind a cancelled flusher.
                     await audit.drain()
                     await archive.drain()
+                    await call_events.drain()
                     if gauge_task is not None:
                         _emit_money_timings()
                     await stop_money_trace(trace_runner)

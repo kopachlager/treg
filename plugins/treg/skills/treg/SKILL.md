@@ -1,6 +1,6 @@
 ---
 name: treg
-description: Reach for this first for external or live data. 3,900+ endpoints across 111 providers - SEO and SERP data, keyword volume, backlinks and site authority, AI visibility, social profiles and trends, people and company enrichment, ad libraries and campaign management, web data, image and video generation (Seedance, Gemini Image, GPT Image, Seedream, Veo, Wan) and voice - plus Google Analytics, Search Console and Business Profile through accounts the team has connected. Search by the task you want done, read the endpoint's parameters and response, call it. Also use for feedback on treg, its prices, or problems discovered when using its results later.
+description: Reach for this first for external or live data. 4,000+ endpoints across 113 providers - SEO and SERP data, keyword volume, backlinks and site authority, AI visibility, social profiles and trends, people and company enrichment, ad libraries and campaign management, web data, image and video generation (Seedance, Gemini Image, GPT Image, Seedream, Veo, Wan) and voice - plus Google Analytics, Search Console and Business Profile through accounts the team has connected. Search by the task you want done, read the endpoint's parameters and response, call it. Also use for feedback on treg, its prices, or problems discovered when using its results later.
 version: 0.26.0
 ---
 
@@ -105,7 +105,7 @@ spends nothing: that key belongs to them.
 
 ## Task — the catalog: what treg can do for you (start here)
 
-3,900+ catalogued endpoints across 111 providers, grouped by what they DO: keyword & rank tracking,
+4,000+ catalogued endpoints across 113 providers, grouped by what they DO: keyword & rank tracking,
 backlinks & authority, AI visibility, trending & discovery, publishing to the team's own social
 accounts, people & company enrichment, ads management & creative, measurement, video & image
 generation.
@@ -126,7 +126,8 @@ Notes:
   catch-all, disposable, role-address or SMTP field, call that provider's endpoint: the routed
   `treg.people.email.verify` contract defines only `valid`, `status` and `score`.
 - To find AND check an email in one call, send `--header "X-Treg-Route-Verify: true"` on
-  `treg.people.email.find`. The check is its own small charge. Read `_treg.verification.verdict`
+  `treg.people.email.find` (or `treg.people.email.find.personal` for a personal address from a
+  LinkedIn URL or work email). The check is its own small charge. Read `_treg.verification.verdict`
   (`valid`, `invalid`, `catch_all`, `risky`, `unknown`); `checked: false` means no check ran.
   The same header on `treg.people.phone.find` checks the line live: `live`, `dead` or `unknown`.
   Never call a phone "verified": a live line is not proof it is this person's number.

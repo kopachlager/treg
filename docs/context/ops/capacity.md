@@ -11,6 +11,7 @@ sources:
   - src/treg/domain/capacity/signatures.py
   - src/treg/domain/capacity/verify.py
   - src/treg/domain/capacity/marks.py
+  - src/treg/domain/capacity/events.py
   - tests/test_capacity_protect.py
   - src/treg/infra/upstream/limiter.py
   - src/treg/domain/capacity/overflow_spend.py
@@ -171,7 +172,8 @@ cache hits and portability lookups cost half a credit. The policy is `credits / 
 bundles are bought by hand and expire 18 months after purchase. The vendor caps concurrency at 210
 requests and throttles per telephone network, so shared-key smoothing uses a conservative 50
 requests per second. An empty balance arrives as a per-result `INSUFFICIENT_CREDIT` inside HTTP 200,
-not a 4xx; it was not forced, so no exhaustion signature or overflow route is claimed.
+not a 4xx. The signature table reads it as an empty balance (a strike, as for Icypeas below); the
+row's `expect` already kept it unbilled. No overflow route is claimed.
 
 Adyntel publishes no free balance or usage API. `NO_BALANCE_API` therefore reports PAYG credits as
 dashboard-only instead of the ambiguous "no fetcher written yet" state. `_KNOWN` classifies the
@@ -461,7 +463,8 @@ pays the aggregator's real price, 0% markup, disclosed in-band when it ships (st
   documented HTTP 429 `Discovery API credit limit reached` is an endpoint quota signal; ordinary
   per-minute 429s with Retry-After remain bursts. reAPI's empty prepaid balance is a **402**
   `error.code 30001 "Insufficient credits. Required: N"` (observed 2026-09-14); PiAPI's wallet
-  exhaustion is acknowledged unobserved. Icypeas is the one **200**: an empty pool answers
+  exhaustion is acknowledged unobserved. Icypeas and HLR Lookup answer with a **200**: HLR's
+  `results[0].error` is `INSUFFICIENT_CREDIT`, and Icypeas' empty pool answers
   `{"validationErrors": [{"message": "insufficient_credits", ...}], "success": false}` on every
   paid route. The call path reads a platform 2xx through the table too, so such an answer is
   released rather than settled, never archived, counted as a strike, and eligible for overflow.
@@ -469,7 +472,7 @@ pays the aggregator's real price, 0% markup, disclosed in-band when it ships (st
   Two guards against
   the next such vendor: `unrecorded`,
   a signal kind for a 4xx no row matched whose body still names credits/quota/balance (pattern =
-  the table's own phrases plus generic nouns) - never a mark, only a log line and
+  the table's own phrases plus generic nouns) - never a mark, only an `unrecorded` event and
   `capacity_signal=unrecorded` on `tool_called`; and the coverage guard in
   `tests/test_capacity_overflow_routes.py`, which fails when a `platform_key_*` provider has neither
   a table row nor an acknowledged gap. `edge_block` is the odd one out: the vendor's CDN refused the
@@ -561,6 +564,18 @@ The breaker is deliberately slow to open and quick to close: a false lock costs 
 one costs one relayed vendor error. A vendor with auto top-up whose balance hovers near zero
 answers a genuine quota 429 once in thousands of calls; one strike must not take the provider
 away from everyone.
+
+The breaker tells an operator through `capacity {json}` lines (`events.py`, logger
+`treg.capacity_events`), one per event: `strike` (pending), `lock_opened` (written once, by the
+strike that turned the row active, stored as the lock's `opened_at`), `lock_cleared` (a probe's
+2xx, `via` `probe` or `sweep_probe`, with `locked_s` counted from `opened_at`, not the first
+pending strike), `unrecorded` (with the tripwire's phrase), `edge_block` and `rate`. Each carries
+`provider`, `slot`, `endpoint_id`, `kind` and the upstream `status`; never the vendor's body. A
+signature meeting a lock already in place emits nothing: the `request` line (`org-traffic.md`)
+carries every refused or relayed call with its `provider`, `credential_tier` and `refused_by`. An
+expired guessed hold that is still dry opens again on its next two strikes, so a lock that nobody
+lifts reopens about hourly. Overflow's marks write no events: an aggregator's failure is not treg's
+account running dry. Alerting on these lines is deployment configuration, not code here.
 
 ## Protect, part two (step D′) — burst smoothing
 
