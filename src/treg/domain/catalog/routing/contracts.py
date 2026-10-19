@@ -72,6 +72,11 @@ class Contract:
     # against the endpoint (`stats.Tally.fold`), so a provider that answers 200 to everything
     # cannot rank on a success rate it did not earn.
     empty_is_failure: bool = False
+    # True where every identity variant names the same one subject (a person's email or phone):
+    # a child that reads more of the caller's keys answers the same question, so expected cost per
+    # hit ranks ahead of how many keys it uses. Left false on searches, where `{title,
+    # company_domain}` and `{company_domain}` are different questions.
+    one_subject: bool = False
 
     @property
     def required_output(self) -> tuple[str, ...]:
@@ -198,6 +203,14 @@ def parse_contracts(doc: dict) -> dict[str, Contract]:
             # A typo'd key would silently scope nothing; failing the routing load instead makes
             # every `treg.*` capability disappear, which test_routing notices at once.
             raise ValueError(f"contract {cap}: scoping must list identity keys of the contract, got {scoping!r}")
+        for section in ("output", "filters"):
+            for k, spec in (c.get(section) or {}).items():
+                mode = spec.get("analytics", "skip") if isinstance(spec, dict) else "skip"
+                if mode not in ("key", "value", "skip") or (section == "filters" and mode == "key"):
+                    # Where a field lands in a call event (application/call_events.py): a typo
+                    # must fail loudly, never quietly emit an identifier as a plain value.
+                    raise ValueError(f"contract {cap}: {section}.{k} analytics must be key, value or skip "
+                                     f"(filters: value or skip), got {mode!r}")
         out[cap] = Contract(
             capability=cap, summary=str(c.get("summary") or ""), identity=_variants(c.get("identity")),
             identity_types=types, derive=dict(c.get("derive") or {}),
@@ -211,6 +224,7 @@ def parse_contracts(doc: dict) -> dict[str, Contract]:
             prefer=tuple(str(p).lower() for p in c.get("prefer") or ()),
             check=_parse_check(cap, c.get("check"), c.get("output") or {}),
             empty_is_failure=bool(c.get("empty_is_failure", False)),
+            one_subject=bool(c.get("one_subject", False)),
             **_parse_verdict(cap, c.get("verdict")))
     return out
 

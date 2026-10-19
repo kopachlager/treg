@@ -3453,13 +3453,16 @@ _SITEMAP_PAGES: tuple[tuple[str, str, str], ...] = (
     ("/vendor-listing", "vendor-listing.md", "0.5"),
     ("/support", "support.html", "0.4"),
     ("/connectors/claude", "claude-connector.html", "0.6"),
+    ("/sheets", "sheets.html", "0.6"),
     ("/people-search", "people-search.html", "0.8"),
     ("/leads-signals", "leads-signals.html", "0.8"),
+    ("/recruit", "recruit.html", "0.8"),
     ("/web-access", "web-access.html", "0.8"),
     ("/grokbot", "grokbot.html", "0.8"),
     ("/fable", "fable-gtm.html", "0.8"),
     ("/gpt6", "astra.html", "0.8"),
     ("/ugc", "ugc.html", "0.8"),
+    ("/aeo", "aeo.html", "0.8"),
     ("/jev", "jev.html", "0.8"),
     ("/terms", "terms.html", "0.2"),
     ("/privacy", "privacy.html", "0.2"),
@@ -3723,6 +3726,14 @@ async def web_access_skill_md():
     return _serve_md("skills/web-access/SKILL.md")
 
 
+@app.get("/skills/recruit/SKILL.md", include_in_schema=False)
+async def recruit_skill_md():
+    """The recruit skill: a job post in, a ranked and contactable shortlist out, with a run file of
+    stage counts and per-candidate vendor trails. Bundled like lead-signals; `.agents/skills/recruit`
+    links to it."""
+    return _serve_md("skills/recruit/SKILL.md")
+
+
 @app.get("/skills/jev-memory/SKILL.md", include_in_schema=False)
 async def jev_memory_skill_md():
     """The jev-memory skill: install (or build) the Claude Code mod in
@@ -3810,6 +3821,13 @@ async def privacy_page(request: Request):
 async def claude_connector_page(request: Request):
     """Setup, scope, billing, privacy, and removal instructions for the Claude connector."""
     return _static_page("claude-connector.html", request)
+
+
+@app.get("/sheets", include_in_schema=False)
+async def sheets_page(request: Request):
+    """What the Google Sheets add-on does, how it is paid for, and where its data goes. Given to
+    Google at Marketplace review, so this path is effectively public API, like /privacy."""
+    return _static_page("sheets.html", request)
 
 
 @app.get("/agent-setup.js", include_in_schema=False)
@@ -3932,6 +3950,15 @@ async def ugc_page(request: Request):
     return _static_page("ugc.html", request)
 
 
+@app.get("/aeo", include_in_schema=False)
+async def aeo_page(request: Request):
+    """Landing page for the AEO workflow article: getting AI answers to recommend a product in four
+    steps (what customers ask, who AI recommends, the sites AI cites, getting onto them) and the
+    one meta prompt that runs them. Indexed like /ugc: canonical, OG meta, in the sitemap,
+    no-cache. Asset paths are relative (media/aeo/…)."""
+    return _static_page("aeo.html", request)
+
+
 @app.get("/showcase", include_in_schema=False)
 async def showcase_page(request: Request):
     """The gallery of products built on treg: each app, its maker and the maker's launch post,
@@ -3969,6 +3996,14 @@ async def leads_signals_page(request: Request):
     """Landing page for the buyer-signals launch ("Claude for Monitor Leads Signal"). Built from the
     /people-search page and served the same way: canonical, in the sitemap, relative asset paths."""
     return _static_page("leads-signals.html", request)
+
+
+@app.get("/recruit", include_in_schema=False)
+async def recruit_page(request: Request):
+    """Landing page for the recruiter launch ("OpenSource LinkedIn Recruiter") — the destination the
+    launch film points viewers at, and the page that sells the recruit skill. Served like
+    /leads-signals: canonical, in the sitemap, relative asset paths."""
+    return _static_page("recruit.html", request)
 
 
 @app.get("/web-access", include_in_schema=False)
@@ -4088,6 +4123,10 @@ async def jev_xboost_judge(request: Request, db: AsyncSession = Depends(get_sess
 # chronological (newest first), not alphabetical.
 _BLOG_LAUNCHES: list[tuple[str, str, str, str]] = [
     # (slug, title, date, one-line blurb)
+    ("/aeo", "How to Get AI to Recommend Your Product", "2026-10-17",
+     "Four steps and one prompt: what customers ask, who AI recommends, the sites it cites, getting on them."),
+    ("/recruit", "OpenSource LinkedIn Recruiter", "2026-10-17",
+     "Paste a job post; your agent ranks candidates and finds personal email and mobile for $0.19 each."),
     ("/web-access", "Free WebAccess for agents", "2026-10-15",
      "Free web search and page reads for your agent; when free fails, the next vendor answers."),
     ("/showcase", "Built with treg", "2026-10-12",
@@ -4432,11 +4471,13 @@ async def well_known_skills_index():
     ugc = _skill_frontmatter("skills/make-ugc/SKILL.md")
     sig = _skill_frontmatter("skills/lead-signals/SKILL.md")
     web = _skill_frontmatter("skills/web-access/SKILL.md")
+    rec = _skill_frontmatter("skills/recruit/SKILL.md")
     return JSONResponse({"skills": [
         {"name": fm.get("name", "treg"), "description": fm.get("description", ""), "files": ["SKILL.md"]},
         {"name": ugc.get("name", "make-ugc"), "description": ugc.get("description", ""), "files": ["SKILL.md"]},
         {"name": sig.get("name", "lead-signals"), "description": sig.get("description", ""), "files": ["SKILL.md"]},
         {"name": web.get("name", "web-access"), "description": web.get("description", ""), "files": ["SKILL.md"]},
+        {"name": rec.get("name", "recruit"), "description": rec.get("description", ""), "files": ["SKILL.md"]},
     ]})
 
 
@@ -4465,6 +4506,12 @@ async def well_known_lead_signals_md():
 async def well_known_web_access_md():
     """The fourth entry `index.json` promises; the same file as /skills/web-access/SKILL.md."""
     return _serve_md("skills/web-access/SKILL.md")
+
+
+@app.get("/.well-known/skills/recruit/SKILL.md", include_in_schema=False)
+async def well_known_recruit_md():
+    """The fifth entry `index.json` promises; the same file as /skills/recruit/SKILL.md."""
+    return _serve_md("skills/recruit/SKILL.md")
 
 
 @app.get("/connect-demo", include_in_schema=False)

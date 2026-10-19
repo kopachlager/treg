@@ -309,6 +309,8 @@ class Settings(BaseSettings):
     platform_key_openmart: str = ""  # Bearer; monthly subscription credits, no auto-top-up
     platform_key_harvestapi: str = ""  # X-API-Key; prepaid USD wallet
     platform_key_fetchinio: str = ""  # X-API-Key; subscription + PAYG credit balance
+    platform_key_sixtyfour: str = ""  # x-api-key; monthly credits, free balance check
+    platform_key_blitzapi: str = ""  # x-api-key; monthly record allowance, free key-info balance
     platform_key_anyapi: str = ""  # X-API-Key; prepaid USD wallet, exact charge settles from costUsd
     platform_key_dropleads: str = ""  # X-API-Key; PAYG credits priced in fx.yaml
     platform_key_quickenrich: str = ""  # Bearer; monthly subscription credits, not auto-top-up
@@ -601,6 +603,20 @@ class Settings(BaseSettings):
     archive_r2_read_timeout_s: float = Field(default=2.0, gt=0, le=120)
     archive_r2_terminal_attempts: int = Field(default=3, ge=1, le=5)
 
+    # Pictures (team and user avatars, /showcase leaderboard icons and screenshots): two S3-API
+    # buckets, separate from the archive's. Uploads land in the private STAGING bucket; publishing
+    # copies a file to the PUBLIC bucket, which `media_base_url` serves (a custom domain such as
+    # https://media.example.com). Off until endpoint, keys and both buckets are set: then uploads are
+    # refused and pages show initials. With no `media_base_url`, treg serves the public bucket
+    # itself at /media-files/. The endpoint must be https, except a local MinIO on localhost.
+    media_store_endpoint: str = ""
+    media_store_access_key_id: str = Field(default="", repr=False)
+    media_store_secret_access_key: str = Field(default="", repr=False)
+    media_staging_bucket: str = ""
+    media_public_bucket: str = ""
+    media_base_url: str = ""
+    media_store_timeout_s: float = Field(default=10.0, gt=0, le=60)
+
     # Comma-separated: exact endpoint IDs, "capability:<prefix>" families (capability:people.),
     # or "*" for every endpoint the policy allows (the default; an operator narrows it to ids or
     # families to stage a rollout). Empty means no serving, even in serve mode - the rollback
@@ -717,6 +733,16 @@ class Settings(BaseSettings):
     # ingestion key (safe to expose to the browser); host defaults to EU cloud.
     posthog_key: str = ""
     posthog_host: str = "https://eu.i.posthog.com"
+    # Call events (call_events.py, docs/context/architecture/call-events.md): one structured,
+    # pseudonymous event per catalog call, POSTed in batches to an HTTP stream (a Cloudflare
+    # Pipelines stream writing an Iceberg table). OFF unless the URL and the HMAC secret are both
+    # set; the token is sent as a bearer when the stream requires one. The secret keys every hash
+    # in an event, so a table holder without it cannot test a guessed email against the table.
+    call_events_url: str = ""
+    call_events_token: str = Field(default="", repr=False)
+    call_events_hmac_secret: str = Field(default="", repr=False)
+    # Comma-separated team ids whose calls are evaluation traffic (`is_eval` on their events).
+    call_events_eval_orgs: str = ""
     # The code identity stamped on every analytics event as `build`. Empty means "use the commit the
     # host exposes, else the installed package version" (analytics.build_id), so an operator only
     # sets TREG_BUILD when the platform does not publish a commit variable.

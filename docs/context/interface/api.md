@@ -115,6 +115,19 @@ token, because the vendor's fetcher has none. 30 MB per file, 300 MB per org per
 `image/*` / `audio/*` / `video/*` only, refused in the sandbox. Refusals: 415 type, 413 size, 429
 quota, 403 sandbox. Not metered. See [media](../architecture/media.md).
 
+## Pictures and the showcase leaderboard
+
+`POST /images/{kind}` (signed-in, verified person; raw body) re-draws and stages a picture
+(`user_avatar`, `team_avatar`, `showcase_icon`, `showcase_shot`) and answers `{key, kind,
+preview_url}`. `PUT /me/avatar` and `PUT /orgs/{id}/avatar` (owner or admin) set or clear (`null`)
+a picture; `/auth/me`, `/orgs` and the member list answer `avatar_url` (null = initials).
+Refusals: 413 size, 415-like 422 type or dimensions, 429 rate, 503 when picture storage is not
+configured. Uploads and avatar changes refuse a cross-site Origin. The /showcase leaderboard
+(`/showcase/leaderboard`, `/showcase/vote` with `{id, up}`, makers' `/showcase/teams/{id}/apps`,
+`/showcase/teams/{id}/keys`, `PUT /showcase/apps/{id}/usage`, `POST /showcase/apps/{id}/remove`,
+staff `/admin/showcase/*`) is hosted only. See
+[showcase](../architecture/showcase.md).
+
 ## Provider resources
 
 `GET /orgs/{id}/provider-resources` is the unified HTTP/curl read for durable provider resources.
@@ -321,7 +334,8 @@ Each successful identity dependency commits its read-only transaction before the
 application use case can open its own session without waiting behind the request's pool slot. The
 dependency-cached session remains usable because every session maker sets `expire_on_commit=False`.
 `require_superadmin` stays on the admin primary pool through `get_admin_session`, shared with
-primary admin handlers. `/admin/errors` uses `get_admin_read_session` for evidence and org names
+primary admin handlers. `/admin/errors` and `/admin/daily` (per-day calls and per-job answers from
+`endpointdaystat`, optionally split out for one provider) use `get_admin_read_session` for their reads
 after the gate releases its connection: a configured reader, otherwise the original admin pool.
 It accepts replication lag for the report, never for authorization, and never retries a failed
 reader on the primary (see [super-admin](../architecture/super-admin.md)).

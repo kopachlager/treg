@@ -6,6 +6,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+import yaml
+
 
 async def test_skill_md_served_and_templated(clients):
     r = await clients.get("/skill.md")
@@ -21,7 +24,7 @@ async def test_well_known_skills_index_advertises_the_skill(clients):
     r = await clients.get("/.well-known/skills/index.json")
     assert r.status_code == 200
     skills = r.json()["skills"]
-    assert [s["name"] for s in skills] == ["treg", "make-ugc", "lead-signals", "web-access"]
+    assert [s["name"] for s in skills] == ["treg", "make-ugc", "lead-signals", "web-access", "recruit"]
     entry = skills[0]
     assert entry["name"] == "treg"
     assert entry["files"] == ["SKILL.md"]
@@ -76,6 +79,17 @@ async def test_web_access_skill_is_served_and_advertised(clients):
     assert f"description: {idx['description']}" in r.text
 
 
+async def test_recruit_skill_is_served_and_advertised(clients):
+    """The recruit workflow as a skill, served and indexed exactly like lead-signals."""
+    r = await clients.get("/skills/recruit/SKILL.md")
+    assert r.status_code == 200 and r.text.startswith("---\nname: recruit")
+    assert "{BASE}" not in r.text
+    wk = await clients.get("/.well-known/skills/recruit/SKILL.md")
+    assert wk.text == r.text
+    idx = (await clients.get("/.well-known/skills/index.json")).json()["skills"][4]
+    assert f"description: {idx['description']}" in r.text
+
+
 async def test_web_access_landing_page_installs_the_skill(clients):
     """The /web-access launch page is served with its placeholders filled and points at the skill it sells."""
     r = await clients.get("/web-access")
@@ -100,3 +114,27 @@ async def test_jev_memory_skill_is_served_but_opt_in(clients):
     market = json.loads((mod / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     assert f"jev-memory@{market['name']}" in r.text
     assert [p["source"] for p in market["plugins"]] == ["./jev-memory"]
+
+
+async def test_recruit_landing_page_installs_the_skill(clients):
+    """The /recruit launch page is served with its placeholders filled and points at the skill it sells."""
+    r = await clients.get("/recruit")
+    assert r.status_code == 200 and "{BASE}" not in r.text
+    assert "npx skills add superdesigndev/treg --skill recruit" in r.text
+    assert "/skills/recruit/SKILL.md" in r.text
+
+
+REPO = Path(__file__).resolve().parents[1]
+PUBLISHED_SKILLS = sorted(
+    p
+    for pattern in ("src/treg/web/skill.md", "src/treg/web/skills/*/SKILL.md", "skills/*/SKILL.md",
+                    "plugin*/**/SKILL.md", "dsh/skills/*/SKILL.md")
+    for p in REPO.glob(pattern)
+)
+
+
+@pytest.mark.parametrize("path", PUBLISHED_SKILLS, ids=lambda p: str(p.relative_to(REPO)))
+def test_published_skill_frontmatter_is_valid_yaml(path):
+    """skills.sh and Claude Code parse the frontmatter as YAML and silently skip a skill that fails."""
+    fm = yaml.safe_load(path.read_text().split("---\n", 2)[1])
+    assert isinstance(fm, dict) and isinstance(fm.get("name"), str) and isinstance(fm.get("description"), str)
