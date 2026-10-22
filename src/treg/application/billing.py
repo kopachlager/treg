@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlmodel import select
 
 from .. import adsconv
@@ -94,7 +94,6 @@ class PriorAutoInvoiceUnresolved(Exception):
         self.invoice_id = invoice_id
 
 
-# ---- units -------------------------------------------------------------------------------------
 def usd_to_micro(amount_usd: int | float) -> int:
     """Whole-dollar setting → micro-USD. Accepts a float only so a config like `5.0` works; the
     result is always an integer, and fractional cents are refused rather than rounded."""
@@ -172,8 +171,8 @@ def validate_threshold_usd(amount_usd) -> int:
     card-fee math): any whole dollar amount from $1 up to the single-top-up ceiling."""
     try:
         value = float(amount_usd)
-    except (TypeError, ValueError):
-        raise TopupRejected("threshold must be a number of US dollars")
+    except (TypeError, ValueError) as exc:
+        raise TopupRejected("threshold must be a number of US dollars") from exc
     if value != int(value):
         raise TopupRejected("the threshold is whole dollars (e.g. 5, not 5.50)")
     if value < 1:
@@ -194,8 +193,8 @@ def validate_topup_usd(amount_usd) -> int:
     s = get_settings()
     try:
         value = float(amount_usd)
-    except (TypeError, ValueError):
-        raise TopupRejected("amount must be a number of US dollars")
+    except (TypeError, ValueError) as exc:
+        raise TopupRejected("amount must be a number of US dollars") from exc
     if value != int(value):
         raise TopupRejected("top-ups are whole dollars (e.g. 10, not 10.50)")
     value = int(value)
@@ -211,7 +210,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-# ---- the Stripe SDK, off the event loop --------------------------------------------------------
 def configured() -> bool:
     return bool(get_settings().stripe_secret_key)
 
@@ -240,7 +238,6 @@ async def _sdk(fn, /, **kwargs):
     return await stripe_adapter.call(fn, api_key=key, **kwargs)
 
 
-# ---- policy reads ------------------------------------------------------------------------------
 def autotopup_prefs(org: Org) -> dict:
     """The org's effective auto-top-up numbers in micro-USD. A stored 0 means "we never chose", so it
     resolves to the deployment default — which is what lets the default move for everyone who never
@@ -249,9 +246,14 @@ def autotopup_prefs(org: Org) -> dict:
     return {
         "threshold_micro": int(org.autotopup_threshold_micro or usd_to_micro(s.autotopup_default_threshold_usd)),
         "amount_micro": int(org.autotopup_amount_micro or usd_to_micro(s.autotopup_default_amount_usd)),
-        "monthly_cap_micro": int(org.autotopup_monthly_cap_micro or usd_to_micro(s.autotopup_monthly_cap_usd)),
+        "monthly_cap_micro": int(org.autotopup_monthly_cap_micro or usd_to_micro(TOPUP_MAX_USD)),
         "per_hour": int(org.autotopup_max_per_hour or s.autotopup_default_per_hour),
     }
+
+
+def autotopup_cap_reached(prefs: dict, month_spend_micro: int) -> bool:
+    """Whether the next automatic charge would pass the monthly cap, so none fires."""
+    return month_spend_micro + prefs["amount_micro"] > prefs["monthly_cap_micro"]
 
 
 def autotopup_wait_s(org: Org) -> int:
@@ -310,7 +312,6 @@ async def owner_email(db: AsyncSession, org_id: int) -> str:
     return rows[0][0] if rows else ""
 
 
-# ---- customer + payment method -----------------------------------------------------------------
 async def get_or_create_customer(db: AsyncSession, org: Org, *, email: str = "") -> str:
     """The org's Stripe Customer id, creating it on first use. Commits when it creates one.
 
@@ -359,12 +360,16 @@ async def _set_default_pm(db: AsyncSession, org_id: int, payment_method: str | N
     return changed
 
 
-def _arm_if_waiting_for_card(org: Org, *, card_proven: bool = False, paid: bool = False) -> bool:
+def _arm_if_waiting_for_card(org: Org, *, card_proven: bool = False, paid: bool = False,
+                             auto_paid: bool = False) -> bool:
     """Turn a consented policy back on when the reason it was off is gone. Mutates, does not commit.
 
     `no_card`: a card now exists. `max_attempts:*` (repeated declines): only when `card_proven`, a
     card that just paid or a newly saved one. Before this a decline never re-armed, so a team paying
     by hand with a working card kept auto top-up off and kept getting balance refusals.
+    `stripe_unconfirmed`: only when an automatic top-up was confirmed paid (`auto_paid`). One
+    invoice serves each refill until it is credited, so that payment is the one the pause doubted;
+    a manual payment is not.
     """
     if not (org.stripe_default_pm and org.autotopup_consented_at) or org.autotopup_enabled:
         return False
@@ -372,7 +377,8 @@ def _arm_if_waiting_for_card(org: Org, *, card_proven: bool = False, paid: bool 
     # redelivered) payment must not switch it back on.
     reason = org.autotopup_disabled_reason or ""
     if not (reason == "no_card" or (card_proven and reason.startswith("max_attempts:"))
-            or (paid and reason == "authentication_required")):
+            or (paid and reason == "authentication_required")
+            or (auto_paid and reason == "stripe_unconfirmed")):
         return False
     org.autotopup_enabled = True
     org.autotopup_disabled_reason = None
@@ -414,7 +420,6 @@ async def _pm_and_fingerprint(pi_id: str) -> tuple[str | None, str | None]:
     return pm.get("id"), fingerprint
 
 
-# ---- manual top-up (Stripe-hosted Checkout) ----------------------------------------------------
 async def create_topup_checkout(
     db: AsyncSession, org: Org, amount_usd, *, return_base: str = "", email: str = "",
     entry_surface: str = "", checkout_source: str = "",
@@ -520,6 +525,9 @@ async def create_setup_checkout(db: AsyncSession, org: Org, *, return_base: str 
         stripe_adapter.CHECKOUT_SESSION_CREATE,
         mode="setup",
         customer=customer,
+        # Required in setup mode when `payment_method_types` is unset; the cards it lets the payer
+        # save are the ones that can pay our USD invoices. The account's default is AUD.
+        currency="usd",
         # Checkout's setup-mode SetupIntent is already `usage=off_session`, so the bank collects the SCA
         # mandate now. Checkout rejects `setup_intent_data[usage]`; it accepts only description,
         # metadata and on_behalf_of there.
@@ -532,7 +540,6 @@ async def create_setup_checkout(db: AsyncSession, org: Org, *, return_base: str 
     return {"url": session["url"], "session_id": session["id"], "mode": "setup"}
 
 
-# ---- the hosted billing portal -----------------------------------------------------------------
 async def create_portal_session(db: AsyncSession, org: Org, *, return_base: str = "") -> dict:
     """A one-time link into Stripe's hosted Customer Portal, where the payer manages their own
     billing details: card, billing address, tax ID, and the invoice history with its PDFs.
@@ -561,10 +568,8 @@ async def create_portal_session(db: AsyncSession, org: Org, *, return_base: str 
     return {"url": session["url"]}
 
 
-# ---- payment history ---------------------------------------------------------------------------
-# Split in two so the DB session (see `get_payment_history`) can close before the Stripe round trip in
-# `_payment_documents` — a pooled connection must never sit open across an upstream call, the same
-# lesson the 2026-08-24 `/call/` deadlock taught (`infra/db.py`).
+# Split in two so the DB session (see `get_payment_history`) can close before the Stripe round
+# trip in `_payment_documents`: a pooled connection must never sit open across an upstream call.
 async def _load_payment_rows(
     db: AsyncSession, org: Org, *, limit: int = 24,
 ) -> tuple[list[CreditBlock], set[str], dict[str, int]]:
@@ -680,7 +685,6 @@ async def _payment_documents(org: Org, wanted: int) -> tuple[dict[str, dict], bo
     return out, True
 
 
-# ---- auto top-up -------------------------------------------------------------------------------
 # Per-org in-process lock. Cheap first line of defence against a burst of concurrent calls all
 # noticing the same low balance; the DB cooldown below is what covers the multi-instance case, and
 # the Stripe idempotency key is what covers both even if the first two fail.
@@ -1017,15 +1021,26 @@ async def attempt_auto_topup(db: AsyncSession, org_id: int) -> dict:
 
         amount_micro = prefs["amount_micro"]
         spent = await monthly_autotopup_spend(db, org_id)
-        if spent + amount_micro > prefs["monthly_cap_micro"]:
+        if autotopup_cap_reached(prefs, spent):
             return {"ok": False, "reason": "monthly_cap", "spent_micro": spent,
                     "cap_micro": prefs["monthly_cap_micro"]}
 
         # Claim the attempt BEFORE talking to Stripe. If this process dies mid-charge, the cooldown
         # has already been recorded — the next attempt waits instead of double-charging blind.
-        org.autotopup_last_attempt_at = _now()
-        db.add(org)
+        # The claim is a compare-and-set on the stamp we just read: `_lock` is per process, so
+        # every web process and instance that read the same old stamp races here, and only the
+        # first UPDATE matches. The rest stop before Stripe instead of piling onto one invoice.
+        stamp = _now()
+        claimed = await db.execute(
+            update(Org).where(
+                Org.id == org_id,
+                Org.autotopup_last_attempt_at.is_(None) if last is None
+                else Org.autotopup_last_attempt_at == last,
+            ).values(autotopup_last_attempt_at=stamp)
+            .execution_options(synchronize_session=False))
         await db.commit()
+        if claimed.rowcount != 1:
+            return {"ok": False, "reason": "cooldown"}
 
         crossing = (await db.execute(select(func.count(CreditBlock.id)).where(
             CreditBlock.org_id == org_id, CreditBlock.stripe_payment_intent.is_not(None)
@@ -1123,8 +1138,22 @@ async def attempt_auto_topup(db: AsyncSession, org_id: int) -> dict:
             await _stop_failed_invoice(invoice_id, key)
             return await _record_failure(db, org_id, code or "card_declined")
         except Exception as e:  # noqa: BLE001 — a Stripe outage must not surface as a 500 elsewhere
+            if (isinstance(e, stripe_adapter.InvalidRequestError)
+                    and e.param in ("payment_method", "default_payment_method")):
+                # Stripe refused the saved card itself (usually removed from the customer through
+                # the portal), so nothing was charged. A new card is the fix and re-arms from
+                # `no_card`. `key` exists only once `invoice_id` does.
+                if invoice_id:
+                    await _stop_failed_invoice(invoice_id, key)
+                return await _card_gone(db, org_id, payment_method)
             # A timeout can arrive after Stripe charged. Keep the same attempt key and the invoice
             # available for the next lookup; auto_advance=False prevents autonomous collection.
+            if getattr(e, "http_status", None) == 409:
+                # Stripe is still running another request on this invoice. Nothing was declined,
+                # so it is not a failed attempt; the cooldown stamp makes the next lookup wait.
+                log.warning("billing: auto top-up for org %s invoice %s overlapped another "
+                            "Stripe request", org_id, getattr(e, "invoice_id", invoice_id) or "unknown")
+                return {"ok": False, "reason": "stripe_busy"}
             return await _record_unconfirmed(
                 db, org_id, getattr(e, "invoice_id", invoice_id), type(e).__name__)
 
@@ -1154,14 +1183,40 @@ async def attempt_auto_topup(db: AsyncSession, org_id: int) -> dict:
         await ledger.topup(db, org_id, credited, pi["id"], meta={"auto": True, "source": "stripe"})
         org = await db.get(Org, org_id)
         org.autotopup_failures = 0
-        org.autotopup_disabled_reason = None
+        # A pause recorded while this attempt was paying is resolved by this payment. Blanking the
+        # reason without re-arming would leave the policy off with no reason, like a deliberate off.
+        _arm_if_waiting_for_card(org, card_proven=True, paid=True, auto_paid=True)
+        org_slug = org.slug
         db.add(org)
         await db.commit()
-        if to and not already:
+        if not already and (to or analytics.enabled()):
             balance_after = await ledger.balance_of(db, org_id)
             await db.rollback()  # release the read connection before sending the receipt
-            await email_mod.send_topup_receipt(to, org_name, credited, balance_after, auto=True)
+            if to:
+                await email_mod.send_topup_receipt(to, org_name, credited, balance_after, auto=True)
+            # The only emitter for an inline auto credit: the webhook finds it credited.
+            _capture_topup_completed(to, org_id, org_slug, {"amount_micro": credited, "auto": True,
+                                                            "balance_after_micro": balance_after})
         return {"ok": True, "payment_intent": pi["id"], "amount_micro": credited}
+
+
+async def _card_gone(db: AsyncSession, org_id: int, payment_method: str) -> dict:
+    """The saved card can no longer be charged. Forget it and wait for a new one, which re-arms.
+
+    Both the card and the switch may have changed while Stripe was answering: a card saved since
+    is already the fix, and a deliberate off must stay one that no future card can undo."""
+    log.warning("billing: auto top-up card for org %s is no longer usable", org_id)
+    org = await db.get(Org, org_id)
+    if org is None or org.stripe_default_pm != payment_method:
+        return {"ok": False, "reason": "no_card"}
+    org.stripe_default_pm = None
+    org.autotopup_failures = 0
+    if org.autotopup_enabled:
+        await _disable_autotopup(db, org, "no_card")
+    else:
+        db.add(org)
+        await db.commit()
+    return {"ok": False, "reason": "no_card"}
 
 
 async def _record_failure(db: AsyncSession, org_id: int, reason: str) -> dict:
@@ -1204,7 +1259,7 @@ def maybe_schedule_autotopup(org: Org) -> bool:
     if org.balance_micro >= autotopup_prefs(org)["threshold_micro"]:
         return False
     # The DB re-checks under its lock; this only spares a task per call while the wait runs, which
-    # matters now that a REFUSED call schedules too (a team at $0 refuses thousands an hour).
+    # matters because a REFUSED call schedules too.
     last = org.autotopup_last_attempt_at
     if last is not None and (_now() - last).total_seconds() < autotopup_wait_s(org):
         return False
@@ -1228,7 +1283,8 @@ async def _run_autotopup(org_id: int) -> None:
         async with session_maker() as db:
             result = await attempt_auto_topup(db, org_id)
         if not result.get("ok") and result.get("reason") not in (
-                "above_threshold", "cooldown", "disabled", "no_consent", "no_card", "not_configured"):
+                "above_threshold", "cooldown", "disabled", "no_consent", "no_card", "not_configured",
+                "stripe_busy"):  # stripe_busy already logged its warning
             log.info("billing: auto top-up for org %s did not fund: %s", org_id, result)
     except Exception as e:  # noqa: BLE001 — a background task's exception must not vanish silently
         log.warning("billing: auto top-up task for org %s crashed: %s", org_id, e)
@@ -1236,7 +1292,6 @@ async def _run_autotopup(org_id: int) -> None:
         _scheduled.discard(org_id)
 
 
-# ---- webhook ------------------------------------------------------------------------------------
 def verify_event(payload: bytes, signature: str) -> dict:
     """Verify a Stripe webhook signature and return the parsed event. Raises `ValueError` on a bad
     signature or payload.
@@ -1293,6 +1348,17 @@ async def handle_webhook_event(db: AsyncSession, event: dict) -> dict:
     return {"handled": False, "type": kind}
 
 
+def _capture_topup_completed(to: str | None, org_id: int, org_slug: str, props: dict) -> None:
+    """One `topup_completed` shape for the webhook credit and the inline auto-top-up credit."""
+    analytics.capture(to or f"org:{org_id}", "topup_completed",
+                      {"entry_surface": analytics.funnel_surface(""),
+                       "checkout_source": analytics.funnel_surface(""),
+                       "bonus_micro": 0, "bonus_pct": 0, **props,
+                       "amount_usd": props["amount_micro"] / 1_000_000,  # display-only, never computed against
+                       "org": org_slug},
+                      groups={"team": org_slug})
+
+
 async def _credit(db: AsyncSession, org_id: int, amount_micro: int, pi_id: str, *, auto: bool,
                   fingerprint: str | None = None, attribution: dict | None = None) -> dict:
     """Credit a paid PaymentIntent to the org's balance, once. Emails a receipt only when this
@@ -1342,8 +1408,11 @@ async def _credit(db: AsyncSession, org_id: int, amount_micro: int, pi_id: str, 
         org = await db.get(Org, org_id)
         if org is not None and (org.autotopup_failures or org.autotopup_disabled_reason):
             # A payment that went through clears the failure history: whatever was wrong with the card
-            # isn't wrong now. (The disabled FLAG is left alone — re-arming is the org's decision.)
+            # isn't wrong now. A confirmed automatic charge also ends an unconfirmed pause; otherwise
+            # the disabled FLAG is left to `_set_default_pm`'s rules.
             org.autotopup_failures = 0
+            if auto:
+                _arm_if_waiting_for_card(org, auto_paid=True)
             db.add(org)
             await db.commit()
         to = await owner_email(db, org_id)
@@ -1354,13 +1423,10 @@ async def _credit(db: AsyncSession, org_id: int, amount_micro: int, pi_id: str, 
         # is org-scoped, so the owner's email is the best available person (the payer may differ);
         # the `team` group is what makes org-level revenue exact. capture() never raises — an
         # exception here would 500 the webhook and make Stripe retry an already-credited payment.
-        analytics.capture(to or f"org:{org_id}", "topup_completed",
-                          {**attribution, "amount_micro": amount_micro,
-                           "amount_usd": amount_micro / 1_000_000,  # display-only, never computed against
-                           "auto": auto, "balance_after_micro": after,
-                           "bonus_micro": bonus_micro, "bonus_pct": bonus_pct,
-                           "org": org.slug if org else ""},
-                          groups={"team": org.slug if org else ""})
+        _capture_topup_completed(to, org_id, org.slug if org else "",
+                                 {**attribution, "amount_micro": amount_micro, "auto": auto,
+                                  "balance_after_micro": after, "bonus_micro": bonus_micro,
+                                  "bonus_pct": bonus_pct})
         # First top-up only: `fresh` is already the "this delivery moved money" branch, and the
         # outbox's unique (org_id, action) makes a second top-up a silent no-op. We measure becoming
         # a payer, not revenue — value-based bidding needs volume treg does not have yet. Guarded like
@@ -1372,13 +1438,6 @@ async def _credit(db: AsyncSession, org_id: int, amount_micro: int, pi_id: str, 
                                     value_usd_micro=amount_micro, dedupe_key=pi_id)
                 await db.commit()
             except Exception as e:  # noqa: BLE001 — see comment above
-                # A failure here (not just adsconv.queue's own IntegrityError, which it already
-                # absorbs via savepoint, but e.g. the commit above failing on a serialization
-                # error or connection blip) can leave the session in SQLAlchemy's "pending
-                # rollback" state. The callers below reuse this same `db` for more work
-                # (_set_default_pm's db.get(Org, ...)); without rolling back here, that next use
-                # raises PendingRollbackError, which 500s the webhook and makes Stripe retry a
-                # payment ledger.topup() already credited. Do not remove this as redundant.
                 await db.rollback()
                 log.warning("billing: could not queue ad conversion for org %s: %s", org_id, e)
         # A paid top-up is the referral program's qualifying event, so this `fresh` branch is the
@@ -1399,7 +1458,7 @@ async def _credit(db: AsyncSession, org_id: int, amount_micro: int, pi_id: str, 
     # queue this small. `sweep` never raises, but the belt stays on — this is a money webhook.
     try:
         await referrals.sweep(db)
-    except Exception as e:  # noqa: BLE001 — pragma: no cover
+    except Exception as e:  # noqa: BLE001
         await db.rollback()
         log.warning("billing: referral sweep failed: %s", e)
     return {"handled": True, "credited": fresh, "block_id": block_id,
@@ -1435,8 +1494,7 @@ async def _on_checkout_completed(db: AsyncSession, session: dict) -> dict:
     if amount_micro <= 0:
         return {"handled": False, "reason": "zero amount"}
     # Read the card BEFORE crediting: `_credit` is where a referral qualifies, and the fingerprint is
-    # the abuse gate that stops one card claiming a bounty under a second email. Same single retrieve
-    # that already ran here for the saved-card id, just moved above the credit.
+    # the abuse gate that stops one card claiming a bounty under a second email.
     pm_id, fingerprint = await _pm_and_fingerprint(pi_id)
     result = await _credit(db, org_id, amount_micro, pi_id, auto=False, fingerprint=fingerprint,
                            attribution=session.get("metadata") or {})
@@ -1569,7 +1627,6 @@ async def _on_setup_succeeded(db: AsyncSession, si: dict) -> dict:
     return {"handled": True, "payment_method_saved": bool(pm_id), "changed": changed}
 
 
-# ---- read model for the API --------------------------------------------------------------------
 async def billing_state(db: AsyncSession, org: Org) -> dict:
     """Everything the dashboard/CLI needs to render billing in one round-trip: is Stripe on, is there
     a customer and a card, what the auto-top-up policy is, and how much of the monthly cap the
@@ -1604,6 +1661,7 @@ async def billing_state(db: AsyncSession, org: Org) -> dict:
             "monthly_cap_usd": ledger.usd(prefs["monthly_cap_micro"]),
             "month_spend_micro": spent,
             "month_spend_usd": ledger.usd(spent),
+            "cap_reached": autotopup_cap_reached(prefs, spent),
             "disabled_reason": org.autotopup_disabled_reason,
             "failures": int(org.autotopup_failures or 0),
             "last_attempt_at": org.autotopup_last_attempt_at.isoformat() if org.autotopup_last_attempt_at else None,
@@ -1632,9 +1690,15 @@ async def set_autotopup(
     if amount_usd is not None:
         org.autotopup_amount_micro = usd_to_micro(validate_topup_usd(amount_usd))
     if monthly_cap_usd is not None:
-        org.autotopup_monthly_cap_micro = usd_to_micro(validate_topup_usd(monthly_cap_usd))
+        # 0 clears a chosen cap back to the default (`autotopup_prefs`).
+        org.autotopup_monthly_cap_micro = (
+            0 if monthly_cap_usd == 0 else usd_to_micro(validate_topup_usd(monthly_cap_usd)))
     if per_hour is not None:
         org.autotopup_max_per_hour = validate_per_hour(per_hour)
+    prefs = autotopup_prefs(org)
+    if prefs["monthly_cap_micro"] < prefs["amount_micro"]:
+        raise TopupRejected(f"the monthly limit (${ledger.usd(prefs['monthly_cap_micro']):g}) is below one "
+                            f"refill (${ledger.usd(prefs['amount_micro']):g}), so auto top-up could never charge")
     if enabled:
         if consent:
             org.autotopup_consented_at = _now()
@@ -1648,7 +1712,6 @@ async def set_autotopup(
     await db.commit()
 
 
-# ---- application journeys ---------------------------------------------------------------------
 async def _journey_org(db: AsyncSession, org_id: int) -> Org:
     org = await db.get(Org, org_id)
     if org is None:
@@ -1726,8 +1789,8 @@ async def configure_autotopup(
 
 
 async def get_payment_history(org_id: int, *, limit: int) -> dict:
-    # The DB session closes before `_payment_documents` calls Stripe below — a pooled connection must
-    # never sit open across an upstream round trip (the 2026-08-24 `/call/` deadlock, `infra/db.py`).
+    # The DB session closes before `_payment_documents` calls Stripe below - a pooled connection must
+    # never sit open across an upstream round trip.
     async with _db.session_maker() as db:
         org = await _journey_org(db, org_id)
         blocks, auto, bonus_by_pi = await _load_payment_rows(db, org, limit=limit)
@@ -1760,7 +1823,7 @@ async def process_webhook(
     async with _db.session_maker() as db:
         try:
             return await handle_webhook_event(db, event)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # 500 tells Stripe to retry, which is what we want for a transient failure — but log
             # loudly: an event that never succeeds is money someone paid and didn't get.
             log.exception("webhook %s failed: %s", event.get("type"), e)

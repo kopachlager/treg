@@ -625,7 +625,13 @@ when a user re-enables auto-top-up and resets the local failure counter. An inco
 lookup leaves the attempt unresolved and counts toward the consecutive-failure limit without
 changing the invoice key. Each unknown outcome is logged as an error. At the limit, auto top-up is
 paused with a specific billing banner and email asking the customer to check billing history and
-contact support. A later manual top-up does not advance the invoice lookup boundary. Before any
+contact support. A confirmed automatic payment ends that pause: the synchronous credit and the
+payment webhook for an automatic invoice both re-arm a policy paused as `stripe_unconfirmed` (one
+invoice serves each refill until it is credited, so that payment is the one in doubt), and a manual
+payment does not. A Stripe refusal naming the payment method (usually a saved card removed from the
+customer) charged nothing, so it is not unconfirmed: the card is forgotten and the policy waits as
+`no_card` until a payment or setup saves a new one. A card saved while that attempt ran is kept and
+leaves the policy on; a deliberate off made meanwhile stays off. A later manual top-up does not advance the invoice lookup boundary. Before any
 credited automatic top-up, the lookup checks the full customer invoice history.
 The cooldown, cap, ledger crossing, last automatic credit, and billing email are read before the
 Stripe sequence; `attempt_auto_topup` then releases the database transaction and retains only the
@@ -701,7 +707,8 @@ SetupIntent in that flow: `_set_default_pm` - called by both `_on_checkout_compl
 the policy back on from `no_card` once a card exists, and from repeated declines
 (`max_attempts:*`) only when the card is proven: it just paid (`paid=True`, both payment webhooks)
 or it is a newly saved card. The declined card saved again is not proof. A successful manual payment
-also re-arms a policy paused for 3DS (`authentication_required`). A deliberate off (reason `None`,
+also re-arms a policy paused for 3DS (`authentication_required`); a successful automatic payment
+also re-arms one paused as `stripe_unconfirmed`. A deliberate off (reason `None`,
 consent still on file) stays off; a redelivered payment webhook must not switch a deliberately
 disabled policy back on.
 
@@ -736,6 +743,24 @@ cooldown stamped in the DB *before* the charge so a second web worker sees it, a
 limit, and an idempotency key derived from the threshold crossing - so a burst of concurrent calls
 that all notice the low balance produces exactly ONE charge.
 
+The monthly cap counts automatic top-ups only (`monthly_autotopup_spend`, from the ledger) and
+refuses a charge that would pass it (`autotopup_cap_reached`). Neither dashboard path names a cap,
+so a stored 0 resolves to the single-top-up ceiling (`TOPUP_MAX_USD`) and moves with it; `treg
+topup --cap` stores a lower one (0 restores the default), and a cap below one refill is refused. The
+billing page shows the month's automatic spend against the limit, and a banner from
+`billing_state.autotopup.cap_reached` when the next charge would pass it. The inline credit in
+`attempt_auto_topup` emits `topup_completed` (`auto: true`) itself: the webhook that follows finds
+the PaymentIntent credited and emits nothing.
+
+The stamp is a compare-and-set, not a plain write: `attempt_auto_topup` updates
+`autotopup_last_attempt_at` only where it still holds the value the attempt read. `_lock` is per
+process, so web processes and instances that read the same old stamp all reach this UPDATE; only
+the first matches, and the rest return `cooldown` before any Stripe call. Without it, every process
+drove the same invoice at once, Stripe answered the losers with 409, each 409 counted as a failure,
+and auto top-up switched itself off while the one real payment went through. A 409 that still
+arrives (`stripe_busy`) means Stripe is running another request on the invoice; it is logged and is
+not a failed attempt.
+
 The wait between charges (`billing.autotopup_wait_s`) is one hour after a FAILED charge
 (`autotopup_cooldown_s`), else one hour divided by the team's `autotopup_max_per_hour` (0 = the
 default `autotopup_default_per_hour`, 5; 1-60 via `POST /billing/autotopup` `per_hour`, `treg topup
@@ -752,13 +777,13 @@ and an invoice archive are the org's money, not a member's preference.
 `GET /orgs/{id}/balance` is different, and deliberately so. Any **member** sees the figure and the
 in-flight holds; the **funding detail** (credit blocks, the ledger) stays admin+. It used to be
 admin-only, which meant a machine identity could not read the balance it was spending - while every
-402 already hands the caller `balance_micro`, and both `llms.txt` and `skill.md` tell an agent to run
-`treg balance` after a call. Refusing the number there while shipping it in an error was incoherent.
+402 already hands the caller `balance_micro`, and `skill.md` points an agent at `treg balance` when
+the balance runs out. Refusing the number there while shipping it in an error was incoherent.
 (Reported by Jason, 2026-08-07.)
 
 The 402 also carries `autotopup_enabled` and an `auto top-up:` line in `message`. Off → the one
 command that turns it on. On → the amount, threshold, charges per hour and monthly cap, plus the flags that
-raise them - because a team that is out of money *with* auto top-up on is being held by the cooldown
+raise the refill rate (`--amount`, `--per-hour`) - because a team that is out of money *with* auto top-up on is being held by the cooldown
 or the cap, and "add funds" alone reads as "auto top-up is broken" (cobl.ai, 2026-08-25: ~1,500
 refusals between hourly $20 refills against a $60/day burn). The org fields are read **before**
 the application reservation transaction: its rollback cannot be a source for refusal rendering after
