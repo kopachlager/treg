@@ -426,6 +426,7 @@ endpoints:
       source_url: https://api.crawl4ai.com/v1/prices
       checked: '2026-10-05'
       confidence: verified
+      display: {unit: URL, value: 0.15}
       note: "A job costs a flat 0.15 credits per URL on treg's account (usage.unit_cost 0.150, observed 2026-10-08); the finished job's usage.cost (after refunds for failed URLs) settles the call. The 75-credit hold is 500 URLs. Job ids may name their region (j_sin-…) and can be read from any region."
     verified: '2026-10-05'
     added: '2026-10-06'
@@ -513,6 +514,7 @@ endpoints:
       source_url: https://crawl4ai.com/llms.txt
       checked: '2026-10-11'
       confidence: verified
+      display: {unit: page, value: 0.15, variable: true}
       note: "Each page fetched at treg's scrape price of 0.15 credits; the finished job's usage.cost settles the call (0.150 observed 2026-10-11 for a one-page job). The 75.15-credit hold is the 500-page maximum."
     verified: '2026-10-11'
     added: '2026-10-11'
@@ -585,6 +587,7 @@ endpoints:
   # label with no budget gets no checks, so its monitors stay paused until one is added.
   - id: crawl4ai.watch.create
     capability: web.monitor.create
+    kind: action
     platform: web
     domain: monitor
     scope: any_account
@@ -627,6 +630,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.budget.add
     capability: web.monitor.budget.add
+    kind: action
     platform: web
     domain: monitor
     scope: any_account
@@ -650,6 +654,7 @@ endpoints:
       unit: credit
       quantity: {field: body.credits, max: 100000, applied: added}
       settle: quantity
+      display: {unit: "credit bought"}
       source: docs
       source_url: https://crawl4ai.com/llms.txt
       checked: '2026-10-19'
@@ -660,6 +665,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.budget.get
     capability: web.monitor.budget.get
+    cache: forbidden
     platform: web
     domain: monitor
     scope: any_account
@@ -677,6 +683,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.changes
     capability: web.monitor.changes
+    kind: action
     platform: web
     domain: monitor
     scope: any_account
@@ -698,6 +705,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.list
     capability: web.monitor.list
+    cache: forbidden
     platform: web
     domain: monitor
     scope: any_account
@@ -715,6 +723,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.get
     capability: web.monitor.get
+    cache: forbidden
     platform: web
     domain: monitor
     scope: any_account
@@ -731,6 +740,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.update
     capability: web.monitor.update
+    kind: action
     platform: web
     domain: monitor
     scope: any_account
@@ -765,6 +775,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.events
     capability: web.monitor.activity
+    cache: forbidden
     platform: web
     domain: monitor
     scope: any_account
@@ -785,6 +796,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.version
     capability: web.monitor.version
+    cache: forbidden
     platform: web
     domain: monitor
     scope: any_account
@@ -802,6 +814,7 @@ endpoints:
     docs_url: https://crawl4ai.com/llms.txt
   - id: crawl4ai.watch.delete
     capability: web.monitor.delete
+    kind: action
     platform: web
     domain: monitor
     scope: any_account
@@ -1961,10 +1974,11 @@ endpoints:
     path: /recipes/google-maps-reviews
     name: Reviews of a place on Google Maps
     summary: 'The reviews Google Maps shows for one place, one row per review: stars, text, date, the reviewer, likes,
-      the owner''s reply and the review''s own link. Google shows a visitor 5 to 8 reviews per order, so a run gives
-      at most 8. `place` is the place''s Google Maps link, its place id (ChIJ...) or its cid (the number in a maps?cid=
-      link); `sort` is relevant (Google''s order) or newest; `limit` how many reviews (default 5, at most 8). About
-      1 to 3 s. Columns: review_id, place_id, rating, text, date, author, likes, owner_reply, url.'
+      the owner''s reply and the review''s own link. `place` is the place''s Google Maps link, its place id (ChIJ...)
+      or its cid (the number in a maps?cid= link); `sort` is relevant (Google''s order) or newest; `limit` how many
+      reviews (default 5, up to 100), one price a call at any limit. About 1 to 3 s for a few reviews, 8 to 16 s for
+      100. A reply with fewer than asked and meta.partial true gives the rest when retried a little later. Columns:
+      review_id, place_id, rating, text, date, author, likes, owner_reply, url.'
     body_allowlist: true
     input:
       bodyType: json
@@ -1972,7 +1986,7 @@ endpoints:
         limit:
           type: integer
           required: false
-          note: default 5
+          note: default 5, up to 100
         place:
           type: string
           required: true
@@ -2487,8 +2501,8 @@ endpoints:
     name: Posts of an Instagram account
     summary: 'The latest posts of one Instagram account, newest first, one row per post: code, URL, caption (first
       500 characters), likes, comments, time posted, kind (photo, video, reel, carousel), image, video URL, owner.
-      `username` is the account (@name or an instagram.com URL is fine); `limit` up to 48, 12 per page. Without `session`
-      a public account is read in 1 to 3 s; when Instagram refuses, a slower second source answers (about 100 s, billed
+      `username` is the account (@name or an instagram.com URL is fine). Without `session` a call returns the 12
+      latest posts (a larger `limit` returns those 12 with meta.partial true) and a public account is read in 1 to 3 s; when Instagram refuses, a slower second source answers (about 100 s, billed
       per record). With `session` (your `sessionid` and `csrftoken` cookies from the Crawl4AI Session extension, used
       once, never stored) it is read as you. Columns: code, url, caption, likes, comments, taken_at, kind, image,
       video_url, owner.'
@@ -2581,7 +2595,8 @@ endpoints:
     name: Reels of an Instagram account
     summary: 'The latest reels of one Instagram account, newest first, one row per reel: id, code, URL, plays, likes,
       comments, thumbnail. `username` is the account (@name or an instagram.com URL), or `user_id` its numeric id
-      (one lookup fewer); `limit` up to 48, 12 per page. Without `session` a public account is read in 2 to 8 s; when
+      (one lookup fewer). Without `session` a call returns the 12 latest reels (a larger `limit` returns those 12 with
+      meta.partial true) and a public account is read in 2 to 8 s; when
       Instagram refuses, a slower second source answers when `username` is given (about 100 s, billed per record,
       plays often empty). With `session` (your `sessionid` and `csrftoken` cookies, used once, never stored) it is
       read as you. Columns: id, code, url, plays, likes, comments, thumbnail.'

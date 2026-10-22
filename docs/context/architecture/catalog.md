@@ -60,6 +60,8 @@ sources:
   - src/treg/catalog/examples/linkup.web.answer.json
   - src/treg/catalog/examples/linkup.web.answer.status.json
   - src/treg/catalog/parallel.yaml
+  - src/treg/catalog/pdl.yaml
+  - src/treg/catalog/pdl.extended.yaml
   - src/treg/web/logos/parallel.svg
   - src/treg/catalog/examples/parallel.web.search.json
   - src/treg/catalog/examples/parallel.web.search.advanced.json
@@ -250,13 +252,21 @@ sent on the shared key, may only carry the caller's own verified email, compared
 another address is a 400 before reserve, and leaving the field out is fine. `_enforce_caller_email`
 checks without rewriting, so a shared provider account sends alerts only to the person who asked.
 
+For a signed-in reader, `GET /catalog/endpoints/{id}` (and so MCP `catalog_get`) adds
+`your_values` on rows with `team_label` or `caller_email` fields: the exact values that reader may
+send (its team's label, its own email), so an agent gets its first call right without a bounce. An
+anonymous reader gets nothing extra; the route is not cached at the edge. MCP `my_tools` also
+returns the team's `team_label`.
+
 `cost.quantity` prices a call by a whole number the caller chooses (a budget of provider credits):
 `{field, max}` names a declared integer body or query field and its ceiling. A missing or
 out-of-range value is a 400 before reserve, the hold is `quantity x price`, and `settle: quantity`
 settles exactly that on success, ignoring any provider-reported charge (adding room is often free on
 the provider's side and reported as 0). An optional `applied` JSON path names the answer field that
 says the units were added; when it is not `true` (a retry the provider recognised by its purchase
-id) the call settles at 0. The validator requires it on a `per_success` price with no
+id) the call settles at 0. A cancel after the request has left (`settle._finish_cancelled_call` with
+`sent`) charges the hold instead of returning it, because the provider may already have added the
+units; the retry with the same purchase id then settles at 0, so the team pays exactly once. The validator requires it on a `per_success` price with no
 `reported_charge`. Together they let a team buy a budget for background work under its own label.
 
 ## Authorization metadata
@@ -1154,7 +1164,9 @@ that slice: it bills one whole credit (~$0.0245) for one email or ten (observed 
 `usd_per_call`. Settlement still reads `usd` and the derived email-count rule — display only.
 `Catalog.cost_view` reads the provider-neutral `cost.display` flags: `unit` names the shown unit,
 `grouped` shows the price for `cost.per` units, `round_up` labels a started block, `variable` adds
-a plus sign for selected additions, and `maximum` labels a validated reserve ceiling as "up to"
+a plus sign for selected additions, `value` shows the price of one `unit` when that is not the reserve
+unit (a job held at its full size but billed per page shows the page price; the hold still reads `usd`),
+and `maximum` labels a validated reserve ceiling as "up to"
 (it may wrap a price table, whose fallback is already the global upper bound). The result is
 display USD / unit / prefix / suffix fields only; `usd` and settlement are untouched. The validator
 checks the flags, requires a grouped price to declare a positive integer `per`, and refuses a table
@@ -2186,6 +2198,8 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   expresses an upper bound in catalog-priced units (for example, fixed-page billing). Both the
   public quote and call-time plan use it through `routing/plan.py::cost_at`; invalid unit values
   remain unpriced. It does not replace the child's normal reserve/settle rules.
+  Optional adapter `max` (`{limit: 8}`) names a filter the provider caps: `build_plan` drops that
+  child for a request above the cap (`needs limit <= 8`) instead of letting it answer less than was asked.
 - **Verified at load, or absent** — `routing/contracts.py::verify`: `in` must reproduce the
   endpoint's own `test_request` and `out` must fill every required core field from its
   `example_response` (an example that is itself a miss passes with the hit half unverified).
@@ -2205,7 +2219,8 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   carries the range. Never hand-written; not in any
   provider file.
   `catalog_get` on it returns the contract and the ranked **plan** (the quote) —
-  nothing is reserved.
+  nothing is reserved. A child the router would not call on treg's key (paused, not
+  `platform_eligible`, no key on this deployment) ranks after the rest with a `skipped` reason.
 - **Ranking** — `routing/plan.py`: own keys (tier 2) first at cost 0; then
   `expected_cost_per_hit = cost_at(request) × P(billed) / P(hit)` where `cost_at` prices *this*
   request at its requested size (per-result × limit, credit-with-minimum rounded up) and `P(hit)`

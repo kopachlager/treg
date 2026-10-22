@@ -276,6 +276,23 @@ line, and `treg --json call` puts it in `_treg.upstream_failed`. A routed child 
 is a `miss` whose `detail` names the failed value. Absent on an overflow answer, an idempotent
 replay, and every unmetered call.
 
+## `X-Treg-Capacity` - treg's own account for this tool is out
+
+`exhausted` on a platform-tier answer the capacity signature table reads as a balance or quota
+signature (`ops/capacity.md`), whatever the status: a 402, Apollo's 422, an out-of-credit 2xx.
+The body is relayed untouched; the header is how a caller learns the refusal is treg's account,
+not its balance and not its key. It is absent on a team's own key, on treg's own refusals
+(`X-Treg-Error`), on an overflow answer, on an idempotent replay and on an owned free poll. It is
+set from the same signal that strikes the capacity breaker (`_note_capacity_signal`), so the
+capacity events that alert are always behind it; a free route on treg's key carries it too. The MCP `call` result omits the provider's body, sets `whose_error: treg` and
+gives one notice as `hint` (`src/treg/capacity_notice.py`): the tool is temporarily unavailable on
+treg's side, the team has been notified (the capacity events alert), the caller was not charged
+when `X-Treg-Cost-Micro` is `0`, and another tool can serve meanwhile. `treg call` prints the same
+notice on stderr and `treg --json call` sets `_treg.capacity`. Only treg's own
+`error: insufficient_balance` (with `X-Treg-Error`, not a replay) is called the team's balance, by
+MCP's hint and `treg call`'s top-up line; a provider's 402 on the team's own key is marked
+`whose_error: provider`, and `route_max_cost` is the caller's ceiling.
+
 ## `X-Treg-Smoothed` - the call waited for treg's own rate limit
 
 On platform calls, including owned free polling: `wait=<ms>` when the call was spaced behind other callers on the
@@ -635,8 +652,7 @@ shared HTTP client. `/auth/logout` remains an HTTP-only cookie action.
   permanent keys; missing `tv` means zero. New scoped credentials do not change those compatibility
   rules. `POST /auth/revoke-tokens` bumps the version and
   returns a replacement cookie/token for the caller. `/auth/logout` is a same-origin cookie action.
-  Onboarding routes are `POST /onboard/demo|skip|reset`, and behind `onboarding_v2`
-  `POST /onboarding/start` + `GET /onboarding` + `POST /onboarding/answer`; see [onboarding](onboarding.md).
+  Onboarding routes are `POST /onboard/demo|skip|reset|team`; see [onboarding](onboarding.md).
 
   The shared dependencies resolve a membership token, a team Default key, a legacy identity bearer
   plus `X-Treg-Org`, or a session cookie plus `X-Treg-Org`. Bootstrap credentials cannot access team
@@ -657,8 +673,7 @@ shared HTTP client. `/auth/logout` remains an HTTP-only cookie action.
   `sitetrack_js` (`GET /sitetrack.js`, no-cache) serves `web/sitetrack.js` with `{POSTHOG_KEY}` /
   `{POSTHOG_HOST}` templated from settings: the always-on first-party `treg_utm` first-touch cookie
   (utm_* + referring host, read by `_utm_attribution_from` / `_stamp_utm` in BOTH signup doors, `/users`
-  and `/orgs`), the first-touch `treg_landing` path cookie (read by the first-run onboarding as
-  ranking evidence) plus the PostHog bootstrap with pageviews ON. Loaded by every public page - landing,
+  and `/orgs`) plus the PostHog bootstrap with pageviews ON. Loaded by every public page - landing,
   use-case pages, resources, tutorial, and the SPA - so analytics sees the visitor's first hop rather
   than the post-OAuth `/app` landing. Without a key the analytics half is inert (empty string).
   `adtrack_js` (`GET /adtrack.js`, no-cache) serves the first-party ad-click capture script loaded by
@@ -953,9 +968,9 @@ why that widening must be kept out of the schema.
 treg is an OAuth authorization server for its own MCP endpoint. Detail in
 `architecture/mcp-oauth.md`; this is the surface.
 
-    GET  /.well-known/oauth-protected-resource      what guards /mcp/ (served at BOTH v1 lookup paths)
+    GET  /.well-known/oauth-protected-resource      what guards /mcp/ (also at /mcp and /mcp/ below it)
     GET  /.well-known/oauth-protected-resource/mcp/v2
-                                                    distinct metadata for /mcp/v2/
+                                                    distinct metadata for /mcp/v2/ (also at .../v2/)
     GET  /.well-known/oauth-authorization-server    endpoints, S256, DCR + CIMD support
     POST /oauth/register                            dynamic client registration (RFC 7591)
     GET  /oauth/authorize                           the consent screen (JSON with Accept: application/json)
